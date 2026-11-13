@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { InputError, KernelError } from "../../kernel/errors.ts";
 import { ProtocolInputError } from "../../protocol/validate.ts";
+import { createDeliveryRunner } from "../../delivery/pipeline.ts";
 import { createFileWatcher } from "./file-watcher.ts";
 import {
   HubRuntime,
@@ -332,7 +333,11 @@ export async function startHubHost(options = {}) {
     agentApiBin: options.agentApiBin,
     appDataDir: options.appDataDir,
     baseEnv: options.baseEnv,
-    deliveryRunner: options.deliveryRunner,
+    deliveryRunner:
+      options.deliveryRunner ??
+      createDeliveryRunner({
+        agyBin: options.agyBin,
+      }),
     notifier: options.notifier,
     notifierOptions: {
       silent: options.silentNotify,

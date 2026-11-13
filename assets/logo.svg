@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" fill="none">
+  <!-- 10% safe margin baked in: artwork bounded within [14, 114] -->
+  <!-- Outer closed-loop orbit in high-contrast vermilion -->
+  <path
+    d="M 64 16 A 48 48 0 1 1 20.5 43.5"
+    stroke="#E11D48"
+    stroke-width="8"
+    stroke-linecap="round"
+  />
+  <!-- Directional loop arrowhead at top-left -->
+  <path
+    d="M 15.5 34.5 L 20.5 47.5 L 33.5 42.5"
+    stroke="#E11D48"
+    stroke-width="7.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <!-- Inner imperial seal stamp ("奏折批红" badge) -->
+  <rect
+    x="37"
+    y="37"
+    width="54"
+    height="54"
+    rx="12"
+    fill="#D92638"
+    stroke="#FDE68A"
+    stroke-width="2.5"
+  />
+  <!-- Stylized seal scroll folds & vermilion approval check -->
+  <path
+    d="M 48 51 H 80 M 48 62 H 68"
+    stroke="#FFF7ED"
+    stroke-width="5"
+    stroke-linecap="round"
+  />
+  <path
+    d="M 51 74 L 60 82 L 79 63"
+    stroke="#FDE68A"
+    stroke-width="5.5"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

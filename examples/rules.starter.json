@@ -1,0 +1,186 @@
+{
+  "timezone": "Asia/Shanghai",
+  "askFirst": [
+    "rm -rf",
+    "git push --force",
+    "git reset --hard",
+    "删除数据库",
+    "对外发送消息",
+    "修改密钥或权限",
+    "产生实质费用"
+  ],
+  "sources": {
+    "manual": { "name": "Manual Emit" },
+    "probe": { "name": "Health Probe" },
+    "git": { "name": "Git Delivery" },
+    "idea": { "name": "Idea Factory" },
+    "watch": { "name": "Local File Watch" }
+  },
+  "agents": {
+    "hydrogen-fast": {
+      "name": "Hydrogen Fast Worker",
+      "runner": "agy-print",
+      "model": "gemini-4-hydrogen-high",
+      "effort": "high",
+      "access": "edit",
+      "maxActive": 2,
+      "timeoutMinutes": 45
+    },
+    "hydrogen-reviewer": {
+      "name": "Hydrogen XHigh Reviewer",
+      "runner": "agy-print",
+      "model": "gemini-4-hydrogen-xhigh",
+      "effort": "xhigh",
+      "access": "read",
+      "maxActive": 2,
+      "timeoutMinutes": 30
+    },
+    "carbon-architect": {
+      "name": "Carbon Architect",
+      "runner": "agy-print",
+      "model": "gemini-4-carbon-high",
+      "effort": "high",
+      "access": "edit",
+      "maxActive": 1,
+      "timeoutMinutes": 60
+    },
+    "local-delivery": {
+      "name": "Local Heterogeneous Delivery",
+      "runner": "delivery",
+      "access": "full",
+      "maxActive": 1,
+      "timeoutMinutes": 30
+    },
+    "health-probe": {
+      "name": "Zero-Token Health Probe",
+      "runner": "command",
+      "command": [
+        "node",
+        "skills/recipe-health-watch/scripts/probe-url.mjs",
+        "--url",
+        "http://127.0.0.1:8080/health",
+        "--threshold",
+        "2"
+      ],
+      "timeoutMinutes": 2
+    }
+  },
+  "rules": [
+    {
+      "name": "morning-brief",
+      "when": { "cron": "0 9 * * 1-5" },
+      "to": "hydrogen-fast",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-morning-brief",
+      "title": "brief-{id}",
+      "tell": "needed"
+    },
+    {
+      "name": "issue-triage",
+      "when": {
+        "watch": {
+          "paths": ["~/Documents/Projects/your-project/.autoloop/inbox"],
+          "debounceMs": 1500,
+          "types": ["inbox.new", "issue.*"]
+        }
+      },
+      "to": "hydrogen-fast",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-issue-triage",
+      "title": "triage-{subject}",
+      "group": "repo-triage",
+      "parallel": 2,
+      "resume": true,
+      "emits": { "source": "git", "types": ["git.branch.ready"] }
+    },
+    {
+      "name": "code-sweep",
+      "when": { "cron": "0 10 * * 1" },
+      "to": "hydrogen-reviewer",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-code-sweep",
+      "title": "sweep-{id}",
+      "tell": "needed"
+    },
+    {
+      "name": "idea-to-sop",
+      "when": { "source": "idea", "types": ["idea.ingest"] },
+      "to": "carbon-architect",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-idea-to-sop",
+      "title": "idea-{subject}",
+      "group": "idea-factory",
+      "parallel": 2,
+      "resume": true,
+      "emits": { "source": "manual", "types": ["sop.ready"] }
+    },
+    {
+      "name": "pr-delivery",
+      "when": { "source": "git", "types": ["git.branch.ready"] },
+      "to": "local-delivery",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-pr-delivery",
+      "title": "delivery-{subject}",
+      "group": "repo-delivery",
+      "parallel": 1,
+      "resume": true,
+      "emits": {
+        "source": "git",
+        "types": [
+          "git.review.changes_requested",
+          "git.delivery.check_failed",
+          "git.delivery.conflict",
+          "git.delivery.smoke_failed"
+        ]
+      }
+    },
+    {
+      "name": "health-probe",
+      "when": { "cron": "*/5 * * * *" },
+      "to": "health-probe",
+      "cwd": "~/Documents/Projects/your-project",
+      "title": "probe-{id}",
+      "group": "health-probe",
+      "tell": "never",
+      "emits": {
+        "source": "probe",
+        "types": ["service.down", "service.recovered"]
+      }
+    },
+    {
+      "name": "health-watch-diagnosis",
+      "when": {
+        "source": "probe",
+        "types": ["service.down", "service.recovered"]
+      },
+      "to": "hydrogen-fast",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-health-watch",
+      "title": "health-{subject}",
+      "group": "health-watch",
+      "parallel": 2,
+      "resume": true
+    },
+    {
+      "name": "manual-dispatch",
+      "when": { "source": "manual", "types": ["task.*", "issue.*"] },
+      "to": "hydrogen-fast",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-issue-triage",
+      "title": "manual-{subject}",
+      "group": "manual-triage",
+      "parallel": 2,
+      "resume": true,
+      "emits": { "source": "git", "types": ["git.branch.ready"] }
+    },
+    {
+      "name": "watch-events",
+      "when": { "source": "watch", "types": ["fs.*"] },
+      "to": "hydrogen-fast",
+      "cwd": "~/Documents/Projects/your-project",
+      "title": "watch-{subject}",
+      "group": "fs-watch",
+      "parallel": 1
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "autoloop",
+  "displayName": "Autoloop 批奏折自动化中台",
+  "description": "将确定性事件调度内核、多模型自动化工作流、本地异构代码审查交付与批奏折工作台面板 100% 原生运行在 Antigravity 内。",
+  "version": "1.0.0",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "查看当前 Autoloop 待批奏折卡片、各流水线运行状态与今日 Token 消耗",
+    "把一篇新教程或业务想法拆解为可执行的 Autoloop 自动化 SOP 与规则草稿",
+    "为当前项目初始化一份开箱即用的 rules.json 并校验配置"
+  ]
+}
