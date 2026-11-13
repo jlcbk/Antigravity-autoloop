@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "autoloop_hub": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "exec node --disable-warning=ExperimentalWarning \"${PLUGIN_ROOT:-.}/mcp/server.mjs\""
+      ]
+    }
+  }
+}
