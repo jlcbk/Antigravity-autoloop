@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Autoloop 批奏折工作台</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/preload.js"></script>
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div id="app-shell" class="app-shell">
+      <header id="overview-bar" class="overview-bar">
+        <div class="overview-top">
+          <div class="brand-group">
+            <span class="brand-seal" aria-hidden="true">
+              <svg
+                viewBox="0 0 24 24"
+                width="18"
+                height="18"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path
+                  d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+                />
+                <polyline points="14 2 14 8 20 8" />
+                <path d="M9 15l2 2 4-4" />
+              </svg>
+            </span>
+            <div class="brand-titles">
+              <h1 class="brand-title">批奏折工作台</h1>
+              <span class="brand-subtitle">Antigravity Autoloop</span>
+            </div>
+          </div>
+
+          <div class="status-controls">
+            <span
+              id="pending-badge"
+              class="pending-badge is-zero"
+              title="待批奏折数"
+            >
+              0 待批
+            </span>
+            <div
+              id="conn-pill"
+              class="conn-pill is-syncing"
+              role="status"
+              aria-live="polite"
+            >
+              <span id="conn-indicator" class="conn-dot"></span>
+              <span id="conn-text" class="conn-text">连接中...</span>
+            </div>
+            <button
+              id="btn-refresh"
+              type="button"
+              class="btn btn-icon"
+              title="立即刷新状态"
+              aria-label="立即刷新状态"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path
+                  d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div
+          id="spending-summary"
+          class="spending-grid"
+          aria-label="运行与 Token 用量统计"
+        >
+          <div class="stat-card">
+            <span class="stat-label">今日轮次</span>
+            <strong id="stat-today-runs" class="stat-value">0</strong>
+            <span id="stat-today-tokens" class="stat-sub"
+              >In 0 · Out 0 · Cache 0</span
+            >
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">近 7 日轮次</span>
+            <strong id="stat-7d-runs" class="stat-value">0</strong>
+            <span id="stat-7d-tokens" class="stat-sub"
+              >In 0 · Out 0 · Cache 0</span
+            >
+          </div>
+        </div>
+      </header>
+
+      <div id="action-banner" class="action-banner is-hidden" role="alert">
+        <span id="action-banner-text" class="action-banner-text"></span>
+        <button
+          id="action-banner-close"
+          type="button"
+          class="btn btn-ghost btn-xs"
+        >
+          关闭
+        </button>
+      </div>
+
+      <main class="workspace-main">
+        <section
+          id="cards-section"
+          class="panel-section"
+          aria-labelledby="cards-heading"
+        >
+          <div class="section-header">
+            <h2 id="cards-heading" class="section-title">
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M7 8h10M7 12h6" />
+              </svg>
+              <span>奏折审批台</span>
+            </h2>
+            <span id="cards-count-meta" class="section-meta">0 项待处理</span>
+          </div>
+
+          <div id="active-cards" class="cards-stack"></div>
+
+          <details id="recent-cards-details" class="collapsible-block">
+            <summary id="recent-cards-summary" class="collapsible-summary">
+              已办结奏折历史 (0)
+            </summary>
+            <div id="recent-cards-list" class="cards-stack is-compact"></div>
+          </details>
+        </section>
+
+        <section
+          id="pipelines-section"
+          class="panel-section"
+          aria-labelledby="pipelines-heading"
+        >
+          <div class="section-header">
+            <h2 id="pipelines-heading" class="section-title">
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+              </svg>
+              <span>自动化流水线矩阵</span>
+            </h2>
+            <span id="pipelines-count-meta" class="section-meta">0 条规则</span>
+          </div>
+
+          <div id="pipeline-lines" class="pipeline-grid"></div>
+
+          <div id="timers-block" class="sub-block is-hidden">
+            <h3 class="sub-block-title">复查预约定时器</h3>
+            <div id="timers-list" class="timers-list"></div>
+          </div>
+
+          <details id="skipped-details" class="collapsible-block is-hidden">
+            <summary id="skipped-summary" class="collapsible-summary">
+              暂停期间跳过事件 (0)
+            </summary>
+            <div id="skipped-list" class="skipped-list"></div>
+          </details>
+        </section>
+
+        <section
+          id="runs-section"
+          class="panel-section"
+          aria-labelledby="runs-heading"
+        >
+          <div class="section-header">
+            <h2 id="runs-heading" class="section-title">
+              <svg
+                viewBox="0 0 24 24"
+                width="15"
+                height="15"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="12 6 12 12 16 14" />
+              </svg>
+              <span>近期轮次流</span>
+            </h2>
+            <span id="runs-count-meta" class="section-meta"
+              >点击任意轮次查看 why 因果</span
+            >
+          </div>
+
+          <div id="runs-list" class="runs-list"></div>
+
+          <div id="runs-pagination" class="pagination-row is-hidden">
+            <button
+              id="btn-load-more-runs"
+              type="button"
+              class="btn btn-secondary btn-sm"
+            >
+              加载更多历史轮次
+            </button>
+          </div>
+        </section>
+      </main>
+
+      <aside
+        id="why-drawer"
+        class="why-drawer is-hidden"
+        role="dialog"
+        aria-modal="false"
+        aria-labelledby="why-drawer-title"
+      >
+        <div class="why-drawer-header">
+          <div class="why-drawer-heading-group">
+            <h2 id="why-drawer-title" class="why-drawer-title">
+              因果追溯 (why)
+            </h2>
+            <span id="why-drawer-subtitle" class="why-drawer-subtitle"></span>
+          </div>
+          <button
+            id="why-drawer-close"
+            type="button"
+            class="btn btn-ghost btn-sm"
+            aria-label="关闭因果抽屉"
+          >
+            关闭
+          </button>
+        </div>
+        <div id="why-drawer-body" class="why-drawer-body"></div>
+      </aside>
+    </div>
+  </body>
+</html>

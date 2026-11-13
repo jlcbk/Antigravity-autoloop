@@ -1,0 +1,23 @@
+{
+  "autoloop-guard": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./hooks/pre-tool-guard.mjs",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./hooks/stop-receipt-check.mjs",
+        "timeout": 10
+      }
+    ]
+  }
+}
