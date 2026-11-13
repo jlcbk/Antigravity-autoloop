@@ -1,0 +1,22 @@
+{
+  "name": "antigravity-autoloop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --disable-warning=ExperimentalWarning --test tests/*.test.ts",
+    "test:quick": "node --disable-warning=ExperimentalWarning --test \"tests/!(simulation).test.ts\"",
+    "test:sim": "node --disable-warning=ExperimentalWarning sim/random.ts 24301 20000",
+    "benchmark": "node --disable-warning=ExperimentalWarning scripts/benchmark.ts",
+    "format:check": "prettier --check \"**/*.{ts,mjs,json}\""
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "prettier": "^3.5.0",
+    "typescript": "^5.8.3"
+  }
+}

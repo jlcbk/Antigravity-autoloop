@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": [
+    "protocol/**/*.ts",
+    "kernel/**/*.ts",
+    "engine/**/*.ts",
+    "delivery/**/*.ts",
+    "sidecars/**/*.ts",
+    "cli/**/*.ts",
+    "tests/**/*.ts",
+    "sim/**/*.ts",
+    "scripts/**/*.ts"
+  ]
+}
