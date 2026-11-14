@@ -20,58 +20,77 @@
 
 本仓库采用**契约先行（Contract-First）+ 多子代理并行研发（Multi-Subagent Parallel Execution）**的大型项目工程规范。所有设计、协议、计划、任务拆解与验收标准均沉淀于以下文档：
 
-| 编号 | 文档路径 | 核心内容与用途 | 目标读者 |
-| :--- | :--- | :--- | :--- |
-| **宪章** | [AGENTS.md](./AGENTS.md) | 架构红线（内核纯洁性、零外部依赖、指令数据分离）、代码规范、TDD 铁律、子代理文件所有权边界 | 协调者、全体 Hydrogen 子代理、审查子代理 |
-| **01** | [docs/01-research-and-feasibility.md](./docs/01-research-and-feasibility.md) | 原项目 `agent-autoloop` 机制深度拆解、卡兹克推文核心思想提炼、Antigravity 全内生架构 1:1 映射与边界约束论证 | 项目负责人、架构师 |
-| **02** | [docs/02-prd-and-target-outcomes.md](./docs/02-prd-and-target-outcomes.md) | 产品愿景、核心用户旅程、8 大功能模块需求规格（FR）、非功能指标（SLO）、内置五大场景模板与最终交付效果定义 | 项目负责人、产品与验收子代理 |
-| **03** | [docs/03-system-architecture-and-protocol.md](./docs/03-system-architecture-and-protocol.md) | 插件目录蓝图、冻结的数据结构与接口契约（`protocol` / `kernel` / `engine` / `hooks` / `mcp` / `sidecar`）、状态机与安全模型 | 全体开发子代理（开工必读） |
-| **04** | [docs/04-development-workflow-and-roadmap.md](./docs/04-development-workflow-and-roadmap.md) | 标准研发流程（SDLC）、6 阶段里程碑（M0–M5）、分支与工作树（`workspace: "share"`）集成规范、阶段准出标准（DoD）与风险矩阵 | 协调者（Coordinator）、合并守门人 |
-| **05** | [docs/05-subagent-wbs-and-hydrogen-guide.md](./docs/05-subagent-wbs-and-hydrogen-guide.md) | **6 波次 × 22 个原子工作包（WP-01 ~ WP-22）超细颗粒度拆解**、零文件冲突所有权矩阵、`Gemini 4 Hydrogen` 调度实操指南与即拷即用 Brief 模板 | 协调者、全体 Hydrogen 子代理 |
-| **06** | [docs/06-testing-verification-and-acceptance.md](./docs/06-testing-verification-and-acceptance.md) | 五层测试金字塔：纯洁性门禁、状态机单元测试、20 万步确定性随机模拟与强杀恢复测试、Antigravity 桩集成测试、真机 `try` 端到端验收手册 | 测试子代理、验证子代理（Verifier） |
+| 编号     | 文档路径                                                                                           | 核心内容与用途                                                                                                                           | 目标读者                                 |
+| :------- | :------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------- |
+| **宪章** | [AGENTS.md](./AGENTS.md)                                                                           | 架构红线（内核纯洁性、零外部依赖、指令数据分离）、代码规范、TDD 铁律、子代理文件所有权边界                                               | 协调者、全体 Hydrogen 子代理、审查子代理 |
+| **01**   | [docs/01-research-and-feasibility.md](./docs/01-research-and-feasibility.md)                       | 原项目 `agent-autoloop` 机制深度拆解、卡兹克推文核心思想提炼、Antigravity 全内生架构 1:1 映射与边界约束论证                              | 项目负责人、架构师                       |
+| **02**   | [docs/02-prd-and-target-outcomes.md](./docs/02-prd-and-target-outcomes.md)                         | 产品愿景、核心用户旅程、8 大功能模块需求规格（FR）、非功能指标（SLO）、内置五大场景模板与最终交付效果定义                                | 项目负责人、产品与验收子代理             |
+| **03**   | [docs/03-system-architecture-and-protocol.md](./docs/03-system-architecture-and-protocol.md)       | 插件目录蓝图、冻结的数据结构与接口契约（`protocol` / `kernel` / `engine` / `hooks` / `mcp` / `sidecar`）、状态机与安全模型               | 全体开发子代理（开工必读）               |
+| **04**   | [docs/04-development-workflow-and-roadmap.md](./docs/04-development-workflow-and-roadmap.md)       | 标准研发流程（SDLC）、6 阶段里程碑（M0–M5）、分支与工作树（`workspace: "share"`）集成规范、阶段准出标准（DoD）与风险矩阵                 | 协调者（Coordinator）、合并守门人        |
+| **05**   | [docs/05-subagent-wbs-and-hydrogen-guide.md](./docs/05-subagent-wbs-and-hydrogen-guide.md)         | **6 波次 × 22 个原子工作包（WP-01 ~ WP-22）超细颗粒度拆解**、零文件冲突所有权矩阵、`Gemini 4 Hydrogen` 调度实操指南与即拷即用 Brief 模板 | 协调者、全体 Hydrogen 子代理             |
+| **06**   | [docs/06-testing-verification-and-acceptance.md](./docs/06-testing-verification-and-acceptance.md) | 五层测试金字塔：纯洁性门禁、状态机单元测试、20 万步确定性随机模拟与强杀恢复测试、Antigravity 桩集成测试、真机 `try` 端到端验收手册       | 测试子代理、验证子代理（Verifier）       |
 
 ---
 
-## 目标仓库结构蓝图（实施态）
+## 仓库结构全景（V1.0.0 完整实现）
 
-完成研发后，本项目本身即是一个标准的 **Antigravity 原生插件包（Plugin Bundle）**，可直接挂载或软链至 `~/.gemini/config/plugins/autoloop/`：
+本项目本身即是一个**零第三方运行时依赖**的标准 **Antigravity 原生插件包（Plugin Bundle）**，可直接挂载或软链至 `~/.gemini/config/plugins/autoloop/`：
 
 ```text
 Antigravity-autoloop/
-├── README.md                          # 项目总览与文档索引
+├── README.md                          # 项目总览、快速上手与文档索引
 ├── AGENTS.md                          # 全局研发宪章与子代理行为铁律
 ├── plugin.json                        # Antigravity 插件清单（打包 Sidecar、MCP、Hooks、Skills、Rules）
-├── mcp_config.json                    # 暴露给聊天会话的 autoloop-mcp 工具服务配置
+├── mcp_config.json                    # 暴露给聊天会话的 autoloop_hub 工具服务配置
 ├── hooks.json                         # PreToolUse 高危拦截与 Stop 回执语法校验生命周期钩子
 ├── package.json                       # 零 dependencies，仅含 TypeScript 类型检查与 Node 24 测试脚本
 ├── tsconfig.json                      # Node 24 原生 TypeScript (erasableSyntaxOnly) 配置
+├── bin/autoloop.mjs                   # 命令行可执行入口
 ├── docs/                              # 完整工程研发文档体系（01 ~ 06）
-├── rules/
-│   └── AGENTS.md                      # 插件启用时注入的精简 Autoloop 协同规则
+├── examples/rules.starter.json        # 开箱即用的多模型角色与场景规则样板
+├── rules/AGENTS.md                    # 插件启用时注入的精简 Autoloop 协同规则 (<2KB)
 ├── skills/
 │   ├── autoloop-admin/SKILL.md        # 规则编写、启停补跑、排障与日常管理手册
 │   ├── recipe-morning-brief/SKILL.md  # 内置场景 1：每日工作区提交与笔记早报
 │   ├── recipe-issue-triage/SKILL.md   # 内置场景 2：Issue / 本地待办自动分诊与修复
 │   ├── recipe-code-sweep/SKILL.md     # 内置场景 3：周期性代码大扫除与死代码清理
 │   ├── recipe-pr-delivery/SKILL.md    # 内置场景 4：本地/GitHub 分支异构审查与自动交付
+│   ├── recipe-health-watch/           # 内置场景 5：零 Token 静默探针巡检与异常自愈
 │   └── recipe-idea-to-sop/SKILL.md    # 内置场景 6：新观点/外部教程拆解试跑与固化流
 ├── protocol/                          # 冻结协议层：Schema、输入校验、回执解析、无外部依赖类型
 ├── kernel/                            # 纯函数确定性内核：decide / evolve / store(node:sqlite) / cron / due
 ├── engine/                            # Antigravity 原生执行器：agy -p 会话适配器、agentapi 唤醒器、command 探针
-├── delivery/                          # 本地 CI 与异构模型只读快照审查流水线（最多 3 轮、绑定 SHA）
-├── mcp/                               # Stdio MCP 服务端（status / why / answer / resolve / emit / pause / replay / run）
+├── delivery/                          # 本地隔离 worktree 检查与异构模型只读快照审查流水线（最多 3 轮、绑定 SHA）
+├── mcp/                               # Stdio MCP 服务端（11 个 autoloop_* 工具，子代理自动防自批隔离）
 ├── hooks/                             # PreToolUse 安全门禁脚本与 Stop 回执校验脚本
-├── sidecars/
-│   └── hub/                           # 常驻 SidecarApp 宿主 + 右侧辅助面板「批奏折工作台」前端（HTML/CSS/JS）
-├── cli/                               # 本地诊断、离线检查（check / explain / why / try）命令行入口
-├── tests/                             # 纯洁性测试、状态机测试、Fake AGY 集成测试
-└── sim/                               # 确定性随机模拟（20 万步种子复现）、不变量检查与 SIGKILL 崩溃恢复测试
+├── sidecars/hub/                      # 常驻 SidecarApp 宿主 + 右侧辅助面板「批奏折工作台」前端（HTML/CSS/JS）
+├── cli/                               # 本地诊断、离线检查（status / why / check / explain / try）命令行入口
+├── scripts/                           # 性能基准测试（benchmark.ts）与本地插件挂载脚本（install-local-plugin.sh）
+├── tests/                             # 纯洁性门禁、状态机测试、安全隔离、DOM 防 XSS 与全链路 E2E 回归（169 用例）
+└── sim/                               # 确定性随机模拟（20 万步种子复现）、12 条不变量检查与 SIGKILL 崩溃恢复压测
 ```
 
 ---
 
-## 如何启动多子代理（Hydrogen）研发
+## 快速上手（Quick Start）
 
-1. **初始化版本控制**：在仓库根目录执行 `git init && git add . && git commit -m "chore: initialize architecture & engineering docs"`（`swarm` 的 `workspace: "share"` 依赖 Git 仓库做独立工作树隔离）。
-2. **阅读调度手册**：打开 [docs/05-subagent-wbs-and-hydrogen-guide.md](./docs/05-subagent-wbs-and-hydrogen-guide.md)，查看波次依赖图与 **Native Swarm + `gemini-4-hydrogen-high` / `gemini-4-hydrogen-xhigh`** 派单指令。
-3. **按波次推进（Wave 0 → Wave 5）**：每波次并行启动互不碰撞文件的 Author 子代理 + 按 `3:1` 比例配备 Verifier 审查子代理，每波次通过 [docs/06-testing-verification-and-acceptance.md](./docs/06-testing-verification-and-acceptance.md) 中的准出检查后合入主分支。
+> **环境要求**：Node.js `>= 24.0.0`（Antigravity 内置兼容运行时）。
+
+```bash
+# 1. 安装开发期类型检查工具（零运行时依赖）并跑通全套校验与测试
+npm install
+npm run typecheck
+npm test
+
+# 2. 一键闭环演练（验证「票拟挂起零进程驻留 -> 批红唤醒原会话续办」）
+./bin/autoloop.mjs try --auto
+
+# 3. 挂载为本地 Antigravity 原生插件（创建 ~/.gemini/config/plugins/autoloop 软链接）
+./scripts/install-local-plugin.sh
+
+# 4. 可选：运行 200,000 步确定性混沌模拟与性能基准测试
+node --disable-warning=ExperimentalWarning sim/random.ts 24301 200000
+npm run benchmark
+```
+
+安装完成后，在 Antigravity 插件中心确认启用 `autoloop`，即可在右侧辅助面板打开 **批奏折工作台**（`sidecar://autoloop/hub/`），或在对话中直接调用 `autoloop_*` MCP 工具。

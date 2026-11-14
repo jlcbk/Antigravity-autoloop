@@ -68,7 +68,7 @@ flowchart LR
 
 通过对当前 Antigravity 运行环境的实机探查，我们确认以下核心底座均已内置就绪：
 - **内置运行时**：本机 Node.js `v24.19.0`（原生内置 `node:sqlite` 的 `DatabaseSync`、原生支持 `.ts` 类型擦除直跑），完全满足「零第三方 npm 运行时依赖」。
-- **内置常驻守护与辅助面板框架（`sidecar_sdk`）**：位于 `/Users/cui/.gemini/antigravity/lib/node_modules/sidecar_sdk`，原生提供 `SidecarApp`（自动绑定 `127.0.0.1:${ANTIGRAVITY_SIDECAR_WEB_PORT}`、自带 `ANTIGRAVITY_SIDECAR_UI_TOKEN` 鉴权、支持 `restart_policy: "always"` 随 Antigravity 自动拉起保活，并支持将 Web UI 挂载至右侧辅助面板 `SIDECAR_UI_ENTRYPOINT_AUX_PANE`）。
+- **内置常驻守护与辅助面板框架（`sidecar_sdk`）**：位于 `~/.gemini/antigravity/lib/node_modules/sidecar_sdk`，原生提供 `SidecarApp`（自动绑定 `127.0.0.1:${ANTIGRAVITY_SIDECAR_WEB_PORT}`、自带 `ANTIGRAVITY_SIDECAR_UI_TOKEN` 鉴权、支持 `restart_policy: "always"` 随 Antigravity 自动拉起保活，并支持将 Web UI 挂载至右侧辅助面板 `SIDECAR_UI_ENTRYPOINT_AUX_PANE`）。
 - **内置双模 Agent 驱动接口（`agy` CLI 与 `agentapi`）**：
   - `agy -p`（Headless Print 模式）：原生支持 `--conversation <id>` 跨进程精准续接会话、`--model <model_id>` 指定任意内部模型、`--effort <low|medium|high|xhigh|max>` 控制推理深度、`--mode <plan|accept-edits|auto>` 与 `--sandbox` 映射权限档位、`--output-format stream-json` 提取会话 ID 与用量统计，且执行完一轮立即退出进程！
   - `agentapi`（UI 会话桥接）：原生支持 `new-conversation` 创建可见对话、`send-message <recipient_id>` 唤醒指定会话、`get-conversation-metadata` 查询状态，且 `SidecarApp` 已将其封装为内置实例方法。

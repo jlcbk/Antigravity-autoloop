@@ -27,7 +27,7 @@
 
 > **前置准备命令**（开启 Wave 0 前在仓库根目录执行一次）：
 > ```bash
-> cd /Users/cui/Documents/Projects/Antigravity-autoloop
+> cd <path-to-Antigravity-autoloop>
 > git init && git add . && git commit -m "docs: initialize architecture and WBS specs"
 > ```
 
