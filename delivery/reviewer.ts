@@ -1107,7 +1107,12 @@ export async function reviewBranchSnapshot(
       reviewerModelOverride?.trim() ||
       configuredSingularModel ||
       lookupExplicitReviewerModel(authorModel, snapshot.config.reviewerModels);
-    reviewerKey = `${reviewerRunner}:${selectedModel || (reviewerCommand ? reviewerCommand.join(" ") : "default")}`;
+    const cmdPart = reviewerCommand ? reviewerCommand.join(" ") : undefined;
+    reviewerKey = cmdPart
+      ? selectedModel
+        ? `${reviewerRunner}:${cmdPart}:${selectedModel}`
+        : `${reviewerRunner}:${cmdPart}`
+      : `${reviewerRunner}:${selectedModel || "default"}`;
   }
 
   // 1. Branch-decoupled SHA idempotency (#311): match by (headSha, mergeBaseSha, reviewerKey).

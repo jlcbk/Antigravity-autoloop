@@ -21,12 +21,16 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { runHerdrAgent } from "../engine/herdr-runner.ts";
+import {
+  extractRemoteTurnOutput,
+  runHerdrAgent,
+} from "../engine/herdr-runner.ts";
 import type { Job } from "../protocol/types.ts";
 
 const tempDirs: string[] = [];
@@ -66,9 +70,21 @@ interface FakeAgentState {
   foreground_cwd?: string;
 }
 
+interface FakeMachineState {
+  id?: string;
+  label?: string;
+  name?: string;
+  target?: string;
+  sshTarget?: string;
+  host?: string;
+  user?: string;
+  port?: number;
+}
+
 interface FakeHerdrScenario {
   serverDown?: boolean;
   serverErrorText?: string;
+  machines?: FakeMachineState[];
   panes: FakePaneState[];
   agents: FakeAgentState[];
   visibleByPane?: Record<string, string>;
@@ -76,6 +92,10 @@ interface FakeHerdrScenario {
   echoPromptInScrollback?: boolean;
   failRecentUnwrapped?: boolean;
   writeHandoffContent?: string | null;
+  remoteTerminalReply?: string;
+  remoteCollapsedPastePrefix?: string;
+  agentPollsUntilIdle?: number;
+  agentListPollCount?: number;
   promptDelayMs?: number;
   promptExitCode?: number;
   promptStderr?: string;
@@ -104,12 +124,18 @@ function createFakeHerdr(
   writeFileSync(callsFile, "", "utf8");
 
   const scriptCode = `
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 const stateFile = ${JSON.stringify(stateFile)};
 const callsFile = ${JSON.stringify(callsFile)};
 const argv = process.argv.slice(2);
+
+function saveStateAtomic(nextState) {
+  const tmp = stateFile + ".tmp." + process.pid;
+  writeFileSync(tmp, JSON.stringify(nextState, null, 2), "utf8");
+  renameSync(tmp, stateFile);
+}
 
 const capturedEnv = {
   PATH: process.env.PATH,
@@ -133,10 +159,25 @@ appendFileSync(
 const state = JSON.parse(readFileSync(stateFile, "utf8"));
 
 let idx = 0;
+let isRemoteCall = false;
 while (idx < argv.length) {
   const flag = argv[idx];
-  if (flag === "--machine" || flag === "-m" || flag === "--session" || flag === "-s") {
+  if (flag === "--machine" || flag === "-m" || flag === "--remote") {
+    isRemoteCall = true;
     idx += 2;
+    continue;
+  }
+  if (flag.startsWith("--machine=") || flag.startsWith("--remote=")) {
+    isRemoteCall = true;
+    idx += 1;
+    continue;
+  }
+  if (flag === "--session" || flag === "-s") {
+    idx += 2;
+    continue;
+  }
+  if (flag.startsWith("--session=")) {
+    idx += 1;
     continue;
   }
   break;
@@ -163,6 +204,21 @@ if (group === "server" && sub === "stop") {
   process.exit(99);
 }
 
+if (group === "machine" && sub === "list") {
+  if (isRemoteCall) {
+    process.stderr.write("machine list must not be invoked with --machine/--remote\\n");
+    process.exit(97);
+  }
+  process.stdout.write(
+    JSON.stringify({
+      id: "cli:machine:list",
+      type: "machine_list",
+      result: { machines: state.machines || [] },
+    }) + "\\n",
+  );
+  process.exit(0);
+}
+
 if (group === "pane" && sub === "list") {
   process.stdout.write(
     JSON.stringify({
@@ -175,6 +231,18 @@ if (group === "pane" && sub === "list") {
 }
 
 if (group === "agent" && sub === "list") {
+  if (typeof state.agentPollsUntilIdle === "number") {
+    state.agentListPollCount = (state.agentListPollCount || 0) + 1;
+    if (state.agentListPollCount > state.agentPollsUntilIdle) {
+      for (const p of state.panes) {
+        if (p.agent_status === "working") p.agent_status = "idle";
+      }
+      for (const a of state.agents) {
+        if (a.agent_status === "working") a.agent_status = "idle";
+      }
+    }
+    saveStateAtomic(state);
+  }
   process.stdout.write(
     JSON.stringify({
       id: "cli:agent:list",
@@ -334,7 +402,31 @@ if (group === "agent" && sub === "prompt") {
       process.stderr.write((state.promptStderr || "prompt failed") + "\\n");
       process.exit(state.promptExitCode);
     }
-    if (typeof state.writeHandoffContent === "string") {
+    if (isRemoteCall) {
+      if (
+        promptText.includes("HANDOFF_SAVED") ||
+        /herdr-handoff-attempt-\\d+\\.md/.test(promptText)
+      ) {
+        process.stderr.write(
+          "REMOTE_VIOLATION: remote prompt must NEVER instruct local handoffFile or HANDOFF_SAVED\\n",
+        );
+        process.exit(98);
+      }
+      if (typeof state.remoteTerminalReply === "string") {
+        state.recentUnwrappedByPane = state.recentUnwrappedByPane || {};
+        const prev = state.recentUnwrappedByPane[target] || "";
+        const trimmedPrev = prev.replace(/\\s+$/, "");
+        const pasteEcho = state.remoteCollapsedPastePrefix
+          ? state.remoteCollapsedPastePrefix + "\\n"
+          : "";
+        state.recentUnwrappedByPane[target] =
+          (trimmedPrev ? trimmedPrev + " " : "") +
+          pasteEcho +
+          state.remoteTerminalReply +
+          "\\nclaude> ";
+        writeFileSync(stateFile, JSON.stringify(state, null, 2), "utf8");
+      }
+    } else if (typeof state.writeHandoffContent === "string") {
       const match = /herdr-handoff-attempt-\\d+\\.md/.exec(promptText);
       const pathMatch = /([^\\s\`"']+herdr-handoff-attempt-\\d+\\.md)/.exec(promptText);
       if (pathMatch && pathMatch[1]) {
@@ -525,10 +617,10 @@ describe("runHerdrAgent target resolution & lossless handoff", () => {
     const startedEvents: Array<{ session: string | null; pid?: number }> = [];
     const job = makeHerdrJob(projectDir, {
       agent: {
-        id: "remote-claude",
-        name: "remote-claude",
+        id: "local-claude",
+        name: "local-claude",
         runner: "herdr",
-        command: [herdrBin, "--machine", "vps-1"],
+        command: [herdrBin, "--session", "dev-local"],
         target: "w3:p1",
         timeoutMinutes: 3,
       },
@@ -563,7 +655,7 @@ describe("runHerdrAgent target resolution & lossless handoff", () => {
     const calls = readCalls();
     assert.ok(calls.length >= 4);
     for (const call of calls) {
-      assert.deepEqual(call.argv.slice(0, 2), ["--machine", "vps-1"]);
+      assert.deepEqual(call.argv.slice(0, 2), ["--session", "dev-local"]);
     }
     const promptCall = calls.find(
       (c) => c.argv[2] === "agent" && c.argv[3] === "prompt",
@@ -572,6 +664,402 @@ describe("runHerdrAgent target resolution & lossless handoff", () => {
     assert.equal(promptCall.argv[4], "w3:p1");
     assert.ok(promptCall.argv.includes("--wait"));
     assert.ok(promptCall.argv.includes("--timeout"));
+  });
+
+  it("handles cross-machine '--machine vps' mode without local handoffFile, isolates scrollback delta past stale receipts, and stages 0600 context cleanly", async () => {
+    const dir = makeTempDir();
+    const remoteRepoDir = "/srv/vps/autoloop-app";
+    const simulatedRemoteFs = path.join(dir, "simulated-vps-fs");
+    mkdirSync(simulatedRemoteFs, { recursive: true });
+    const { contextFile, guardFile } = makeRunFiles(dir, 43, 1);
+    const contextPayload = JSON.stringify({
+      events: [
+        {
+          id: "evt-vps-1",
+          summary: "UNTRUSTED_SUMMARY_DO_NOT_INTERPOLATE",
+          detail: "UNTRUSTED_DETAIL_SECRET_OVERRIDE",
+        },
+      ],
+    });
+    writeFileSync(contextFile, contextPayload, "utf8");
+
+    // Pre-existing scrollback from an earlier turn on the same persistent remote pane (must NOT leak into this turn!)
+    const priorTurnScrollback = [
+      "claude> [Pasted text #1 +29 lines]",
+      "已完成上一轮旧任务",
+      "",
+      "```agent-autoloop",
+      JSON.stringify({
+        ask: [
+          {
+            key: "stale-old-turn-ask",
+            title: "旧轮次遗留卡片",
+            text: "绝对不能在第二轮被重复提取！",
+            options: ["错误选项A", "错误选项B"],
+            about: "stale-turn",
+          },
+        ],
+      }),
+      "```",
+      "claude> ",
+    ].join("\n");
+
+    const currentTurnTerminalReply = [
+      "已完成远程 VPS 窗格代码审查，发现 1 项需人工确认的配置变更",
+      "",
+      "| 文件 | 结论 |",
+      "| :--- | :--- |",
+      "| `engine/herdr-runner.ts` | 通过（含超长无折行路径 `/very/long/path/that/would/wrap/in/80/col/tui/viewport/file.ts`） |",
+      "",
+      "```agent-autoloop",
+      JSON.stringify({
+        ask: [
+          {
+            key: "confirm-vps-deploy",
+            title: "是否发布到远程 VPS",
+            text: "远程终端直接回传的 JSON 回执完整解析成功。",
+            options: ["立即部署", "暂不部署"],
+            recommend: 0,
+            about: "vps 部署确认",
+          },
+        ],
+      }),
+      "```",
+    ].join("\n");
+
+    const { herdrBin, readCalls } = createFakeHerdr(dir, {
+      machines: [
+        {
+          name: "vps",
+          sshTarget: "deploy@198.51.100.77:2222",
+        },
+      ],
+      panes: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          cwd: remoteRepoDir,
+          foreground_cwd: remoteRepoDir,
+          agent: "claude",
+          agent_status: "idle",
+        },
+      ],
+      agents: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          name: "vps-reviewer",
+          agent: "claude",
+          agent_status: "idle",
+          cwd: remoteRepoDir,
+          foreground_cwd: remoteRepoDir,
+        },
+      ],
+      recentUnwrappedByPane: {
+        "w3:p1": priorTurnScrollback,
+      },
+      remoteCollapsedPastePrefix: "[Pasted text #2 +34 lines]",
+      remoteTerminalReply: currentTurnTerminalReply,
+    });
+
+    const stagedFiles: Array<{
+      machineTarget: string;
+      remoteContextFile: string;
+      stagedDiskPath: string;
+      mode: number;
+      content: string;
+    }> = [];
+    const cleanedFiles: string[] = [];
+
+    const job = makeHerdrJob(remoteRepoDir, {
+      run: 43,
+      attempt: 1,
+      agent: {
+        id: "vps-claude",
+        name: "vps-claude",
+        runner: "herdr",
+        command: [herdrBin, "--machine", "vps"],
+        target: "w3:p1",
+        timeoutMinutes: 3,
+      },
+    });
+
+    const exec = await runHerdrAgent({
+      job,
+      contextFile,
+      guardFile,
+      remoteStageContext: async (info) => {
+        const stagedDiskPath = path.join(
+          simulatedRemoteFs,
+          path.basename(info.remoteContextFile),
+        );
+        const bytes = readFileSync(info.localContextFile);
+        writeFileSync(stagedDiskPath, bytes, { mode: 0o600 });
+        chmodSync(stagedDiskPath, 0o600);
+        stagedFiles.push({
+          machineTarget: info.machineTarget,
+          remoteContextFile: info.remoteContextFile,
+          stagedDiskPath,
+          mode: statSync(stagedDiskPath).mode & 0o777,
+          content: bytes.toString("utf8"),
+        });
+        return true;
+      },
+      remoteCleanupContext: async (info) => {
+        cleanedFiles.push(info.remoteContextFile);
+      },
+    });
+
+    assert.equal(exec.started, true);
+    assert.equal(exec.exitCode, 0);
+    assert.equal(exec.outcome, "done");
+    assert.equal(exec.session, "herdr:w3:p1");
+    assert.equal(
+      exec.summary,
+      "已完成远程 VPS 窗格代码审查，发现 1 项需人工确认的配置变更",
+    );
+    assert.equal(exec.parsed.problem, null);
+    assert.equal(exec.parsed.receipt?.ask?.length, 1);
+    assert.equal(exec.parsed.receipt?.ask?.[0]?.key, "confirm-vps-deploy");
+    assert.equal(
+      exec.rawText.includes("stale-old-turn-ask"),
+      false,
+      "must strip pre-existing scrollback receipts from earlier turns",
+    );
+
+    // Verify remote 0600 staging & cleanup
+    assert.equal(stagedFiles.length, 1);
+    assert.equal(stagedFiles[0]!.machineTarget, "deploy@198.51.100.77:2222");
+    assert.match(
+      stagedFiles[0]!.remoteContextFile,
+      /^\/tmp\/autoloop-context-43-1-[a-f0-9]{8}\.json$/,
+    );
+    assert.equal(stagedFiles[0]!.mode, 0o600);
+    assert.equal(stagedFiles[0]!.content, contextPayload);
+    assert.deepEqual(cleanedFiles, [stagedFiles[0]!.remoteContextFile]);
+
+    // Verify wrappedPrompt NEVER contains HANDOFF_SAVED, local handoffFile, or untrusted summary/detail
+    const calls = readCalls();
+    const machineListCall = calls.find(
+      (c) => c.argv[0] === "machine" && c.argv[1] === "list",
+    );
+    assert.ok(
+      machineListCall,
+      "expected herdr machine list --json without --machine flag",
+    );
+    assert.deepEqual(machineListCall.argv, ["machine", "list", "--json"]);
+
+    const baselineReadCall = calls.find(
+      (c) =>
+        c.argv[2] === "agent" &&
+        c.argv[3] === "read" &&
+        c.argv.includes("recent-unwrapped") &&
+        c.argv.includes("240"),
+    );
+    assert.ok(baselineReadCall, "expected pre-prompt baseline 240-line read");
+
+    const postReadCall = calls.find(
+      (c) =>
+        c.argv[2] === "agent" &&
+        c.argv[3] === "read" &&
+        c.argv.includes("recent-unwrapped") &&
+        c.argv.includes("400"),
+    );
+    assert.ok(postReadCall, "expected post-prompt 400-line read");
+
+    const promptCall = calls.find(
+      (c) => c.argv[2] === "agent" && c.argv[3] === "prompt",
+    );
+    assert.ok(promptCall);
+    const wrappedPrompt = promptCall.argv[5] ?? "";
+    assert.equal(wrappedPrompt.includes("HANDOFF_SAVED"), false);
+    assert.equal(/herdr-handoff-attempt-/.test(wrappedPrompt), false);
+    assert.equal(
+      wrappedPrompt.includes(contextFile),
+      false,
+      "remote staged prompt should reference remoteContextFile instead of local Mac contextFile",
+    );
+    assert.equal(
+      wrappedPrompt.includes(stagedFiles[0]!.remoteContextFile),
+      true,
+    );
+    assert.equal(
+      wrappedPrompt.includes("UNTRUSTED_SUMMARY_DO_NOT_INTERPOLATE"),
+      false,
+    );
+    assert.equal(
+      wrappedPrompt.includes("UNTRUSTED_DETAIL_SECRET_OVERRIDE"),
+      false,
+    );
+    assert.equal(
+      existsSync(
+        path.join(path.dirname(contextFile), "herdr-handoff-attempt-1.md"),
+      ),
+      false,
+      "must not create or use local handoffFile when isRemote === true",
+    );
+  });
+
+  it("stages remote context over default ssh binary (umask 077 + rm -f cleanup), falls back safely when SSH is unavailable, and rejects option-injected SSH targets", async () => {
+    const dir = makeTempDir();
+    const sshBinDir = path.join(dir, "fake-ssh-bin");
+    const sshRemoteTmp = path.join(dir, "fake-remote-tmp");
+    const sshCallsFile = path.join(dir, "fake-ssh-calls.jsonl");
+    mkdirSync(sshBinDir, { recursive: true });
+    mkdirSync(sshRemoteTmp, { recursive: true });
+
+    const fakeSshPath = path.join(sshBinDir, "ssh");
+    writeFileSync(
+      fakeSshPath,
+      `#!/usr/bin/env node
+import { appendFileSync, chmodSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+const argv = process.argv.slice(2);
+const remoteCmd = argv[argv.length - 1] || "";
+const host = argv[argv.length - 2] || "";
+let stagedMode = null;
+let stagedText = null;
+
+if (remoteCmd.startsWith("umask 077 && cat > ")) {
+  const remotePath = remoteCmd.slice("umask 077 && cat > ".length).trim();
+  const data = readFileSync(0);
+  const mapped = path.join(${JSON.stringify(sshRemoteTmp)}, path.basename(remotePath));
+  writeFileSync(mapped, data, { mode: 0o600 });
+  chmodSync(mapped, 0o600);
+  stagedMode = statSync(mapped).mode & 0o777;
+  stagedText = data.toString("utf8");
+} else if (remoteCmd.startsWith("rm -f ")) {
+  const remotePath = remoteCmd.slice("rm -f ".length).trim();
+  const mapped = path.join(${JSON.stringify(sshRemoteTmp)}, path.basename(remotePath));
+  rmSync(mapped, { force: true });
+}
+
+appendFileSync(${JSON.stringify(sshCallsFile)}, JSON.stringify({ argv, host, remoteCmd, stagedMode, stagedText }) + "\\n", "utf8");
+process.exit(0);
+`,
+      "utf8",
+    );
+    chmodSync(fakeSshPath, 0o755);
+
+    const { contextFile, guardFile } = makeRunFiles(dir, 44, 1);
+    const { herdrBin, readCalls } = createFakeHerdr(dir, {
+      panes: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          cwd: "/srv/app",
+          foreground_cwd: "/srv/app",
+          agent: "codex",
+          agent_status: "idle",
+        },
+      ],
+      agents: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          agent: "codex",
+          agent_status: "idle",
+          cwd: "/srv/app",
+          foreground_cwd: "/srv/app",
+        },
+      ],
+      remoteTerminalReply: "没事可做：SSH 自动同步 0600 上下文成功",
+    });
+
+    // 1) --remote user@host:2222 stages via ssh stdin + cleans up in finally
+    const sshExec = await runHerdrAgent({
+      job: makeHerdrJob("/srv/app", {
+        run: 44,
+        agent: {
+          id: "ssh-codex",
+          name: "ssh-codex",
+          runner: "herdr",
+          command: [herdrBin, "--remote", "ops@192.0.2.10:2222"],
+          target: "w3:p1",
+        },
+      }),
+      contextFile,
+      guardFile,
+      baseEnv: {
+        ...process.env,
+        PATH: `${sshBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      },
+    });
+    assert.equal(sshExec.outcome, "nothing");
+    assert.equal(sshExec.summary, "SSH 自动同步 0600 上下文成功");
+
+    const sshCalls = readFileSync(sshCallsFile, "utf8")
+      .trim()
+      .split("\n")
+      .map(
+        (l) =>
+          JSON.parse(l) as {
+            argv: string[];
+            host: string;
+            remoteCmd: string;
+            stagedMode: number | null;
+          },
+      );
+    assert.equal(
+      sshCalls.length,
+      2,
+      "expected stage + rm -f cleanup ssh calls",
+    );
+    assert.deepEqual(sshCalls[0]!.argv.slice(0, 6), [
+      "-o",
+      "BatchMode=yes",
+      "-o",
+      "ConnectTimeout=5",
+      "-p",
+      "2222",
+    ]);
+    assert.equal(sshCalls[0]!.host, "ops@192.0.2.10");
+    assert.equal(sshCalls[0]!.stagedMode, 0o600);
+    assert.match(
+      sshCalls[1]!.remoteCmd,
+      /^rm -f \/tmp\/autoloop-context-44-1-/,
+    );
+
+    // 2) Offline / custom tunnel fallback + SSH option-injection rejection (--remote -oProxyCommand=evil)
+    writeFileSync(sshCallsFile, "", "utf8");
+    const fallbackExec = await runHerdrAgent({
+      job: makeHerdrJob("/srv/app", {
+        run: 45,
+        agent: {
+          id: "evil-target",
+          name: "evil-target",
+          runner: "herdr",
+          command: [herdrBin, "--remote", "-oProxyCommand=evil"],
+          target: "w3:p1",
+        },
+      }),
+      contextFile,
+      guardFile,
+      baseEnv: {
+        ...process.env,
+        PATH: `${sshBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      },
+    });
+    assert.equal(fallbackExec.outcome, "nothing");
+    assert.equal(
+      readFileSync(sshCallsFile, "utf8").trim(),
+      "",
+      "must reject SSH targets starting with '-' and never spawn ssh",
+    );
+    const allHerdrCalls = readCalls();
+    const lastPromptCall = [...allHerdrCalls]
+      .reverse()
+      .find((c) => c.argv.includes("prompt"));
+    const fallbackPrompt = lastPromptCall?.argv[5] ?? "";
+    assert.match(
+      fallbackPrompt,
+      /若当前远端机器无法访问该控制端本地路径，切勿报错中断/,
+    );
+    assert.equal(
+      fallbackPrompt.includes("UNTRUSTED_SUMMARY_DO_NOT_INTERPOLATE"),
+      false,
+    );
   });
 
   it("reuses cwd-matching idle agent first for target 'kind:codex', then falls back to unique global idle agent", async () => {
@@ -1414,5 +1902,178 @@ describe("runHerdrAgent security isolation, state guards & cancellation", () => 
       null,
       "must not parse the example agent-autoloop block echoed from promptFor()",
     );
+  });
+
+  it("preserves original session (preserveSession: true) when resumed pane 'herdr:w3:p1' exists and is temporarily busy, or proceeds if it settles within busyRetryMs", async () => {
+    const dir = makeTempDir();
+    const { contextFile, guardFile } = makeRunFiles(dir, 105, 1);
+
+    // 1) Resumed pane w3:p1 stays "working" past busyRetryMs -> preserveSession: true, session: "herdr:w3:p1"
+    const stillWorkingFake = createFakeHerdr(makeTempDir(), {
+      panes: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          cwd: dir,
+          agent: "claude",
+          agent_status: "working",
+        },
+      ],
+      agents: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          agent: "claude",
+          agent_status: "working",
+          cwd: dir,
+        },
+      ],
+    });
+
+    const busyResumedExec = await runHerdrAgent({
+      job: makeHerdrJob(dir, { run: 105, session: "herdr:w3:p1" }),
+      contextFile,
+      guardFile,
+      herdrBin: stillWorkingFake.herdrBin,
+      busyRetryMs: 300,
+      busyPollIntervalMs: 40,
+    });
+    assert.equal(busyResumedExec.started, false);
+    assert.equal(busyResumedExec.preserveSession, true);
+    assert.equal(busyResumedExec.session, "herdr:w3:p1");
+    assert.equal(busyResumedExec.exitCode, 1);
+    assert.equal(busyResumedExec.outcome, "failed");
+    assert.ok(
+      stillWorkingFake
+        .readCalls()
+        .filter((c) => c.argv[0] === "agent" && c.argv[1] === "list").length >=
+        2,
+      "expected bounded readiness poll on agent list before giving up",
+    );
+
+    // 2) Resumed pane w3:p1 is "blocked" -> preserveSession: true, session: "herdr:w3:p1" immediately
+    const blockedResumedFake = createFakeHerdr(makeTempDir(), {
+      panes: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          cwd: dir,
+          agent: "claude",
+          agent_status: "blocked",
+        },
+      ],
+      agents: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          agent: "claude",
+          agent_status: "blocked",
+          cwd: dir,
+        },
+      ],
+    });
+
+    const blockedResumedExec = await runHerdrAgent({
+      job: makeHerdrJob(dir, { run: 106, session: "herdr:w3:p1" }),
+      contextFile,
+      guardFile,
+      herdrBin: blockedResumedFake.herdrBin,
+      busyRetryMs: 120,
+      busyPollIntervalMs: 40,
+    });
+    assert.equal(blockedResumedExec.started, false);
+    assert.equal(blockedResumedExec.preserveSession, true);
+    assert.equal(blockedResumedExec.session, "herdr:w3:p1");
+
+    // 3) Resumed pane w3:p1 starts "working" on poll 1, settles to "idle" on poll 2 -> succeeds on w3:p1!
+    const settlingFake = createFakeHerdr(makeTempDir(), {
+      panes: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          cwd: dir,
+          agent: "claude",
+          agent_status: "working",
+        },
+      ],
+      agents: [
+        {
+          pane_id: "w3:p1",
+          workspace_id: "w3",
+          agent: "claude",
+          agent_status: "working",
+          cwd: dir,
+        },
+      ],
+      agentPollsUntilIdle: 1,
+      writeHandoffContent: "短暂忙碌后就绪并在原窗格完成续接",
+    });
+
+    const settledExec = await runHerdrAgent({
+      job: makeHerdrJob(dir, { run: 107, session: "herdr:w3:p1" }),
+      contextFile,
+      guardFile,
+      herdrBin: settlingFake.herdrBin,
+      busyRetryMs: 500,
+      busyPollIntervalMs: 40,
+    });
+    assert.equal(settledExec.started, true);
+    assert.equal(settledExec.outcome, "done");
+    assert.equal(settledExec.session, "herdr:w3:p1");
+    assert.equal(settledExec.summary, "短暂忙碌后就绪并在原窗格完成续接");
+  });
+
+  it("extractRemoteTurnOutput handles 240-vs-400 scrollback window offset and partial scrollback rotation", () => {
+    const marker = "[AUTOLOOP_HERDR_PROMPT_END:99:1]";
+    const olderHistory = Array.from(
+      { length: 120 },
+      (_, i) => `history-line-${i + 1}`,
+    );
+    const baseline240 = [
+      ...Array.from({ length: 235 }, (_, i) => `base-line-${i + 1}`),
+      "```agent-autoloop",
+      '{"notice":[{"title":"stale","text":"old"}]}',
+      "```",
+      "claude> ",
+    ];
+    const newTurnLines = [
+      "已完成窗口偏移增量提取",
+      "",
+      "```agent-autoloop",
+      '{"notice":[{"title":"fresh","text":"new"}]}',
+      "```",
+      "claude> ",
+    ];
+
+    // Window where 400-line read starts earlier than 240-line baseline
+    const after400Contained = [
+      ...olderHistory,
+      ...baseline240.slice(0, -1),
+      "claude> [Pasted text #3 +25 lines]",
+      ...newTurnLines,
+    ].join("\n");
+    const extracted1 = extractRemoteTurnOutput(
+      after400Contained,
+      baseline240.join("\n"),
+      marker,
+    );
+    assert.equal(extracted1.includes('"stale"'), false);
+    assert.equal(extracted1.includes('"fresh"'), true);
+    assert.match(extracted1, /^已完成窗口偏移增量提取/);
+
+    // Window where scrollback rotated so only the last 40 lines of baseline remain at top of 400-line read
+    const after400Rotated = [
+      ...baseline240.slice(200, -1),
+      "claude> [Pasted text #4 +25 lines]",
+      ...newTurnLines,
+    ].join("\n");
+    const extracted2 = extractRemoteTurnOutput(
+      after400Rotated,
+      baseline240.join("\n"),
+      marker,
+    );
+    assert.equal(extracted2.includes('"stale"'), false);
+    assert.equal(extracted2.includes('"fresh"'), true);
+    assert.match(extracted2, /^已完成窗口偏移增量提取/);
   });
 });

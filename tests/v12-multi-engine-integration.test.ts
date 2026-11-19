@@ -1354,6 +1354,244 @@ describe("WP-5 V1.2 Multi-Engine Supervisor & Cross-Vendor Delivery Integration"
     }
   });
 
+  it("Test 2c: Supervisor preserves 'herdr:w3:p1' on backoff retry when w3:p1 is temporarily working, and downgrades to idle pane when w3:p99 is closed", async () => {
+    const root = makeTempDir("autoloop-wp5-t2c-");
+    const autoloopHome = path.join(root, "home");
+    const workspaceDir = path.join(root, "workspace");
+    mkdirSync(workspaceDir, { recursive: true });
+
+    const herdrStateFile = path.join(root, "herdr-busy-state.json");
+    const herdrRecordsFile = path.join(root, "herdr-busy-records.jsonl");
+    writeFileSync(
+      herdrStateFile,
+      JSON.stringify(
+        {
+          panes: [
+            {
+              pane_id: "w3:p1",
+              workspace_id: "w3",
+              cwd: workspaceDir,
+              foreground_cwd: workspaceDir,
+              agent: "claude",
+              agent_name: "primary-claude",
+              agent_status: "idle",
+            },
+            {
+              pane_id: "w1:p1",
+              workspace_id: "w1",
+              cwd: "/other",
+              foreground_cwd: "/other",
+              agent: "claude",
+              agent_name: "backup-claude",
+              agent_status: "idle",
+            },
+          ],
+          agents: [
+            {
+              pane_id: "w3:p1",
+              workspace_id: "w3",
+              name: "primary-claude",
+              agent: "claude",
+              agent_status: "idle",
+              cwd: workspaceDir,
+              foreground_cwd: workspaceDir,
+            },
+            {
+              pane_id: "w1:p1",
+              workspace_id: "w1",
+              name: "backup-claude",
+              agent: "claude",
+              agent_status: "idle",
+              cwd: "/other",
+              foreground_cwd: "/other",
+            },
+          ],
+          replyText: "已在目标窗格完成处理",
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+
+    const fakeHerdr = makeExecutableScript(
+      root,
+      "fake-herdr-busy.mjs",
+      `
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
+
+const argv = process.argv.slice(2);
+const group = argv[0] ?? "";
+const sub = argv[1] ?? "";
+const state = JSON.parse(readFileSync(${JSON.stringify(herdrStateFile)}, "utf8"));
+
+if (group === "pane" && sub === "list") {
+  process.stdout.write(JSON.stringify({ id: "cli:pane:list", type: "pane_list", result: { panes: state.panes } }) + "\\n");
+  process.exit(0);
+}
+if (group === "agent" && sub === "list") {
+  process.stdout.write(JSON.stringify({ id: "cli:agent:list", type: "agent_list", result: { agents: state.agents } }) + "\\n");
+  process.exit(0);
+}
+if (group === "agent" && sub === "read") {
+  process.stdout.write("claude> \\n");
+  process.exit(0);
+}
+if (group === "agent" && sub === "prompt") {
+  const targetPane = argv[2] ?? "";
+  const promptText = argv[3] ?? "";
+  const pathMatch = /([^\\s\`"']+herdr-handoff-attempt-\\d+\\.md)/.exec(promptText);
+  if (pathMatch && pathMatch[1]) {
+    mkdirSync(path.dirname(pathMatch[1]), { recursive: true });
+    writeFileSync(pathMatch[1], state.replyText + " (" + targetPane + ")", "utf8");
+  }
+  appendFileSync(${JSON.stringify(herdrRecordsFile)}, JSON.stringify({ targetPane, promptText }) + "\\n", "utf8");
+  process.stdout.write(JSON.stringify({
+    id: "cli:agent:prompt",
+    type: "agent_prompt",
+    result: { agent: { pane_id: targetPane, agent_status: "idle" } },
+  }) + "\\n");
+  process.exit(0);
+}
+process.exit(2);
+`,
+    );
+
+    let nowMs = Date.parse("2026-11-19T18:00:00.000Z");
+    const runtime = new HubRuntime({
+      autoloopHome,
+      now: () => nowMs,
+      enableSupervisor: true,
+      capacity: 2,
+      pollIntervalMs: 30,
+      killGraceMs: 80,
+      herdrBin: fakeHerdr,
+      notifierOptions: { silent: true },
+    });
+
+    try {
+      runtime.configureRules({
+        timezone: "UTC",
+        askFirst: [],
+        sources: { ops: { name: "Ops" } },
+        agents: {
+          "herdr-claude": {
+            name: "Herdr Claude",
+            runner: "herdr",
+            target: "kind:claude",
+            access: "edit",
+          },
+        },
+        rules: [
+          {
+            name: "r-herdr-session",
+            when: { source: "ops", types: ["t.herdr.session"] },
+            to: "herdr-claude",
+            cwd: workspaceDir,
+            resume: true,
+          },
+        ],
+      });
+      runtime.start();
+
+      // Step 1: Establish session "herdr:w3:p1" on Run 1
+      runtime.ingestEvent("ops", { id: "hb-1", type: "t.herdr.session" });
+      await waitUntil("Run 1 done on herdr:w3:p1", () => {
+        const st = runtime.getState();
+        return st.runs.length === 1 &&
+          st.runs[0]!.status === "done" &&
+          st.runs[0]!.session === "herdr:w3:p1"
+          ? st
+          : null;
+      });
+
+      // Step 2: Mark w3:p1 as temporarily "working" while w1:p1 remains "idle"
+      const busyState = JSON.parse(readFileSync(herdrStateFile, "utf8"));
+      busyState.panes[0].agent_status = "working";
+      busyState.agents[0].agent_status = "working";
+      writeFileSync(herdrStateFile, JSON.stringify(busyState, null, 2), "utf8");
+
+      nowMs += 1_000;
+      runtime.ingestEvent("ops", { id: "hb-2", type: "t.herdr.session" });
+
+      // Wait for Attempt 1 of Run 2 to settle into backoff retry ("queued" with attempt >= 1)
+      const backoffState = await waitUntil(
+        "Run 2 queued in backoff with herdr:w3:p1 preserved",
+        () => {
+          const st = runtime.getState();
+          const run2 = st.runs.find((r) => r.run === 2);
+          return run2 &&
+            run2.status === "queued" &&
+            run2.attempt >= 1 &&
+            Boolean(run2.notBefore) &&
+            runtime.supervisor!.activeRuns().length === 0
+            ? run2
+            : null;
+        },
+        10_000,
+      );
+
+      assert.equal(
+        backoffState.session,
+        "herdr:w3:p1",
+        "Supervisor must preserve herdr:w3:p1 instead of wiping session: null when pane is temporarily working",
+      );
+      assert.equal(
+        readJsonl(herdrRecordsFile).length,
+        1,
+        "must NOT switch to backup pane w1:p1 while w3:p1 still exists and is working",
+      );
+
+      // Step 3: w3:p1 finishes its other turn -> becomes "idle"; advance clock past backoff -> resumes w3:p1!
+      busyState.panes[0].agent_status = "idle";
+      busyState.agents[0].agent_status = "idle";
+      writeFileSync(herdrStateFile, JSON.stringify(busyState, null, 2), "utf8");
+
+      nowMs = Date.parse(backoffState.notBefore!) + 1_000;
+      await runtime.supervisor!.kick();
+
+      await waitUntil("Run 2 done on original pane w3:p1", () => {
+        const st = runtime.getState();
+        const run2 = st.runs.find((r) => r.run === 2);
+        return run2 && run2.status === "done" ? run2 : null;
+      });
+
+      const callsAfterRetry = readJsonl<{ targetPane: string }>(
+        herdrRecordsFile,
+      );
+      assert.equal(callsAfterRetry.length, 2);
+      assert.equal(callsAfterRetry[1]!.targetPane, "w3:p1");
+
+      // Step 4: User closes w3:p1 completely (simulating disappeared pane e.g. w3:p99) -> Run 3 downgrades to session: null and completes on idle w1:p1!
+      busyState.panes = busyState.panes.filter(
+        (p: { pane_id: string }) => p.pane_id !== "w3:p1",
+      );
+      busyState.agents = busyState.agents.filter(
+        (a: { pane_id: string }) => a.pane_id !== "w3:p1",
+      );
+      writeFileSync(herdrStateFile, JSON.stringify(busyState, null, 2), "utf8");
+
+      nowMs += 1_000;
+      runtime.ingestEvent("ops", { id: "hb-3", type: "t.herdr.session" });
+
+      const run3Done = await waitUntil(
+        "Run 3 downgraded to idle pane w1:p1",
+        () => {
+          const st = runtime.getState();
+          const run3 = st.runs.find((r) => r.run === 3);
+          return run3 && run3.status === "done" ? run3 : null;
+        },
+      );
+      assert.equal(run3Done.attempt, 1);
+      assert.equal(run3Done.session, "herdr:w1:p1");
+
+      assertInvariants(runtime.store.view);
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it("Test 3a: cross-vendor delivery review with reviewerRunner='codex' blocks Round 1, reviews Round 2 incremental diff (prevSha..headSha) in read-only mode, checks in git worktree & merges", async () => {
     const root = makeTempDir("autoloop-wp5-t3-codex-");
     const codexTurns = path.join(root, "deliv-codex-turns.json");
@@ -1662,7 +1900,7 @@ describe("WP-5 V1.2 Multi-Engine Supervisor & Cross-Vendor Delivery Integration"
           ? st
           : null;
       });
-      assert.match(afterR1.runs[0]!.summary ?? "", /acp:qwen3-coder-plus/);
+      assert.match(afterR1.runs[0]!.summary ?? "", /acp:.*:qwen3-coder-plus/);
 
       const acpCallsR1 = readJsonl<{
         guardJson: { access: string };
@@ -1713,6 +1951,65 @@ describe("WP-5 V1.2 Multi-Engine Supervisor & Cross-Vendor Delivery Integration"
         acpCallsR2[1]!.promptText,
         new RegExp(`${sha1.slice(0, 12)}\\.\\.${sha2.slice(0, 12)}`),
       );
+
+      // Verify switching reviewerCommand from opencode ACP -> kimi ACP with the SAME reviewerModels.default ("qwen3-coder-plus") invalidates ledger cache!
+      const kimiAcpTurns = path.join(root, "deliv-kimi-acp-turns.json");
+      const kimiAcpRecords = path.join(root, "deliv-kimi-acp-records.jsonl");
+      writeFileSync(
+        kimiAcpTurns,
+        JSON.stringify({
+          turn: 0,
+          turns: [{ sessionId: "kimi-acp-rev-1", text: '{"findings":[]}' }],
+        }),
+        "utf8",
+      );
+      const fakeKimiAcp = createScriptedAcpServer(
+        root,
+        kimiAcpTurns,
+        kimiAcpRecords,
+      );
+
+      const kimiAcpSnap = await extractBranchSnapshot({
+        repoDir,
+        targetRef: "feat/acp-auth",
+        outputDir: path.join(root, "kimi-acp-snap"),
+      });
+      kimiAcpSnap.config.reviewerRunner = "acp";
+      kimiAcpSnap.config.reviewerCommand = [
+        process.execPath,
+        fakeKimiAcp,
+        "kimi",
+        "acp",
+      ];
+      kimiAcpSnap.config.reviewerModels = {
+        default: "qwen3-coder-plus",
+      };
+
+      const kimiAcpReview = await reviewBranchSnapshot({
+        snapshot: kimiAcpSnap,
+        ledgerFile: path.join(autoloopHome, "delivery", "review-ledger.json"),
+        postResultGraceMs: 80,
+      });
+      assert.equal(
+        kimiAcpReview.cached,
+        false,
+        "switching reviewerCommand with identical reviewerModels.default must miss cache and run fresh review",
+      );
+      assert.equal(kimiAcpReview.status, "approved");
+      assert.match(
+        kimiAcpReview.reviewerModel,
+        /^acp:.*kimi acp:qwen3-coder-plus$/,
+      );
+      assert.equal(readJsonl(kimiAcpRecords).length, 1);
+
+      // Re-running with identical reviewerCommand + reviewerModels.default hits cache!
+      const kimiAcpCached = await reviewBranchSnapshot({
+        snapshot: kimiAcpSnap,
+        ledgerFile: path.join(autoloopHome, "delivery", "review-ledger.json"),
+        postResultGraceMs: 80,
+      });
+      assert.equal(kimiAcpCached.cached, true);
+      assert.equal(readJsonl(kimiAcpRecords).length, 1);
 
       // Also verify reviewerRunner='claude' passes `--permission-mode plan` and caches under `claude:default`
       const claudeTurns = path.join(root, "deliv-claude-turns.json");
