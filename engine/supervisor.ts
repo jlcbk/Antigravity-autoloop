@@ -65,6 +65,7 @@ export interface SupervisorOptions {
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
   killGraceMs?: number;
+  postResultGraceMs?: number;
   agyBin?: string;
   agentApiBin?: string;
   appDataDir?: string;
@@ -187,6 +188,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
     let totalUsage: RunUsage | undefined;
     let anyStarted = false;
     let latestSession: string | null = null;
+    let downgradedFromStaleSession = false;
     let submitted = false;
 
     const handleStarted = (info: { session: string | null; pid?: number }) => {
@@ -194,6 +196,9 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       const session = nonEmptyString(info.session);
       if (session !== null) {
         latestSession = session;
+      }
+      if (downgradedFromStaleSession && session === null) {
+        return;
       }
       if (markedStarted && session === lastMarkedSession) {
         return;
@@ -230,6 +235,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
               agyBin: options.agyBin,
               baseEnv: options.baseEnv,
               killGraceMs: options.killGraceMs,
+              postResultGraceMs: options.postResultGraceMs,
               onStarted: handleStarted,
               signal: abortController.signal,
             });
@@ -283,11 +289,45 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
       totalUsage = accumulateUsage(totalUsage, exec.usage);
       if (exec.started) {
         anyStarted = true;
+        const initialSession = nonEmptyString(exec.session);
+        if (initialSession !== null) {
+          latestSession = initialSession;
+        }
+      } else if (
+        nonEmptyString(job.session) !== null &&
+        !entry.kernelCancelled &&
+        !abortController.signal.aborted &&
+        exec.outcome !== "cancelled" &&
+        exec.cancelled !== true &&
+        exec.timedOut !== true &&
+        exec.exitCode !== 0
+      ) {
+        downgradedFromStaleSession = true;
+        const freshJob: Job = {
+          ...job,
+          session: null,
+        };
+        exec = await invokeRunner(freshJob);
+        totalUsage = accumulateUsage(totalUsage, exec.usage);
+        if (exec.started) {
+          anyStarted = true;
+          const freshSession = nonEmptyString(exec.session);
+          if (freshSession !== null) {
+            latestSession = freshSession;
+          }
+        }
       }
-      const initialSession = nonEmptyString(exec.session);
-      if (initialSession !== null) {
-        latestSession = initialSession;
-      }
+
+      const initialExec = exec;
+      const initialBusinessCompleted =
+        !entry.kernelCancelled &&
+        !abortController.signal.aborted &&
+        initialExec.outcome !== "cancelled" &&
+        initialExec.cancelled !== true &&
+        initialExec.timedOut !== true &&
+        initialExec.exitCode === 0 &&
+        (initialExec.parsed.outcome === "done" ||
+          initialExec.parsed.outcome === "nothing");
 
       const supportsRepair =
         job.agent.runner === "agy-print" || job.agent.runner === "agentapi-ui";
@@ -298,6 +338,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         !entry.kernelCancelled &&
         !abortController.signal.aborted &&
         exec.outcome !== "cancelled" &&
+        exec.cancelled !== true &&
         exec.exitCode === 0 &&
         exec.parsed.problem !== null &&
         latestSession !== null &&
@@ -315,10 +356,10 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         totalUsage = accumulateUsage(totalUsage, repairedExec.usage);
         if (repairedExec.started) {
           anyStarted = true;
-        }
-        const repairedSession = nonEmptyString(repairedExec.session);
-        if (repairedSession !== null) {
-          latestSession = repairedSession;
+          const repairedSession = nonEmptyString(repairedExec.session);
+          if (repairedSession !== null) {
+            latestSession = repairedSession;
+          }
         }
         exec = repairedExec;
       }
@@ -329,18 +370,70 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         return;
       }
 
-      const exposedSession = anyStarted
-        ? (latestSession ?? undefined)
-        : undefined;
+      const exposedSession =
+        anyStarted && latestSession !== null ? latestSession : undefined;
 
       let result: RunResult;
-      if (entry.kernelCancelled || exec.outcome === "cancelled") {
+      if (
+        entry.kernelCancelled ||
+        exec.outcome === "cancelled" ||
+        exec.cancelled === true
+      ) {
         result = {
           outcome: "cancelled",
           summary: "stopped by user",
         };
         if (exposedSession !== undefined) result.session = exposedSession;
         if (totalUsage !== undefined) result.usage = totalUsage;
+      } else if (
+        exec.exitCode === 0 &&
+        exec.parsed.problem === null &&
+        exec.outcome !== "failed"
+      ) {
+        result = {
+          outcome: exec.outcome,
+        };
+        if (exec.summary) result.summary = exec.summary;
+        if (exposedSession !== undefined) result.session = exposedSession;
+        if (totalUsage !== undefined) result.usage = totalUsage;
+        if (exec.parsed.receipt) {
+          attachReceiptFields(result, exec.parsed.receipt);
+        }
+      } else if (
+        initialBusinessCompleted &&
+        (exec.parsed.problem !== null || exec.exitCode !== 0)
+      ) {
+        // discardReceipt fallback: preserve completed business outcome without 10x failed retries
+        const problem =
+          exec.parsed.problem ??
+          initialExec.parsed.problem ??
+          exec.error ??
+          "回执解析异常";
+        const preservedOutcome = initialExec.parsed.outcome as
+          | "done"
+          | "nothing";
+        const preservedSummary =
+          initialExec.parsed.summary || exec.summary || "";
+        result = {
+          outcome: preservedOutcome,
+        };
+        if (preservedSummary) {
+          result.summary = preservedSummary;
+        }
+        if (exposedSession !== undefined) {
+          result.session = exposedSession;
+        }
+        if (totalUsage !== undefined) {
+          result.usage = totalUsage;
+        }
+        if (preservedOutcome === "done") {
+          result.notice = [
+            {
+              title: "回执格式损坏已忽略",
+              text: `本轮业务已完成，但末尾 agent-autoloop 回执连续修复未通过已丢弃，请人工核查结果：\n${problem}`,
+            },
+          ];
+        }
       } else if (exec.parsed.problem !== null) {
         const errMsg =
           exec.exitCode === 0
@@ -353,7 +446,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         if (exec.summary) result.summary = exec.summary;
         if (exposedSession !== undefined) result.session = exposedSession;
         if (totalUsage !== undefined) result.usage = totalUsage;
-      } else if (exec.outcome === "failed") {
+      } else {
         result = {
           outcome: "failed",
           error: exec.error ?? (exec.summary || "run failed"),
@@ -361,16 +454,6 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         if (exec.summary) result.summary = exec.summary;
         if (exposedSession !== undefined) result.session = exposedSession;
         if (totalUsage !== undefined) result.usage = totalUsage;
-      } else {
-        result = {
-          outcome: exec.outcome,
-        };
-        if (exec.summary) result.summary = exec.summary;
-        if (exposedSession !== undefined) result.session = exposedSession;
-        if (totalUsage !== undefined) result.usage = totalUsage;
-        if (exec.parsed.receipt) {
-          attachReceiptFields(result, exec.parsed.receipt);
-        }
       }
 
       await Promise.resolve(
