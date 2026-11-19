@@ -147,7 +147,7 @@ describe("WP-18 Starter Rules, Recipe Skills, Zero-Token Probe, and Try Flow", (
     assert.equal(config.timezone, "Asia/Shanghai");
     assert.ok(config.askFirst.length >= 5);
 
-    for (const src of ["manual", "probe", "git", "idea", "watch"]) {
+    for (const src of ["manual", "probe", "git", "idea", "video", "watch"]) {
       assert.ok(config.sources[src], `missing starter source: ${src}`);
     }
 
@@ -172,6 +172,7 @@ describe("WP-18 Starter Rules, Recipe Skills, Zero-Token Probe, and Try Flow", (
       "morning-brief",
       "issue-triage",
       "idea-to-sop",
+      "ai-video-studio",
       "pr-delivery",
       "health-probe",
       "health-watch-diagnosis",
@@ -231,6 +232,27 @@ describe("WP-18 Starter Rules, Recipe Skills, Zero-Token Probe, and Try Flow", (
       parsedHealthRules.rules.some((r) => r.skill === "recipe-health-watch"),
       true,
     );
+
+    const videoSkill = readFileSync(
+      path.join(REPO_ROOT, "skills", "recipe-ai-video-studio", "SKILL.md"),
+      "utf8",
+    );
+    const videoFm = parseFrontmatter(videoSkill);
+    assert.equal(videoFm.name, "recipe-ai-video-studio");
+    const videoJsonBlocks = extractJsonBlocks(videoSkill);
+    assert.equal(videoJsonBlocks.length, 1);
+    const parsedVideoRules = parseRulesConfig({
+      askFirst: ["产生实质费用"],
+      ...(videoJsonBlocks[0] as Record<string, unknown>),
+    });
+    assert.equal(parsedVideoRules.rules[0]?.skill, "recipe-ai-video-studio");
+    const videoReceipt = readMessage(
+      videoSkill.replace(/````markdown|````/g, ""),
+    );
+    assert.equal(videoReceipt.problem, null);
+    assert.equal(videoReceipt.outcome, "done");
+    assert.equal(videoReceipt.receipt?.ask?.length, 1);
+    assert.equal(videoReceipt.receipt?.ask?.[0]?.key, "video-gate3-quote");
   });
 
   it("exercises probe-url.mjs against a real HTTP server: 200 silent -> 2x 500 service.down -> 200 service.recovered + resolve", async () => {

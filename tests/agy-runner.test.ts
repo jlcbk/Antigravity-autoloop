@@ -128,7 +128,6 @@ describe("buildAgyArgs", () => {
     });
 
     assert.deepEqual(buildAgyArgs(readJob, "hello prompt"), [
-      "--print",
       "--output-format",
       "stream-json",
       "--model",
@@ -140,6 +139,7 @@ describe("buildAgyArgs", () => {
       "--mode",
       "plan",
       "--sandbox",
+      "--print",
       "hello prompt",
     ]);
 
@@ -156,12 +156,12 @@ describe("buildAgyArgs", () => {
     });
 
     assert.deepEqual(buildAgyArgs(editDefaultJob, "edit prompt"), [
-      "--print",
       "--output-format",
       "stream-json",
       "--mode",
       "accept-edits",
       "--sandbox",
+      "--print",
       "edit prompt",
     ]);
 
@@ -177,11 +177,11 @@ describe("buildAgyArgs", () => {
     });
 
     assert.deepEqual(buildAgyArgs(fullJob, "full prompt"), [
-      "--print",
       "--output-format",
       "stream-json",
       "--mode",
       "auto",
+      "--print",
       "full prompt",
     ]);
   });

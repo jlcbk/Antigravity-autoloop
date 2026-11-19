@@ -825,6 +825,11 @@ export async function runAgentApiUi(
       options.baseEnv?.ANTIGRAVITY_AGENTAPI_EXE,
       process.env.ANTIGRAVITY_AGENTAPI_EXE,
     ) ?? "agentapi";
+  const subcommandPrefix = /^language_server(?:\.exe)?$/i.test(
+    path.basename(bin),
+  )
+    ? ["agentapi"]
+    : [];
   const appDataDir =
     options.appDataDir ?? path.join(homeDir, ".gemini", "antigravity");
   const expandedCwd = expandHomePath(options.job.rule.cwd, homeDir);
@@ -865,7 +870,7 @@ export async function runAgentApiUi(
   let highWaterMark = 0;
 
   if (!session) {
-    const args: string[] = ["new-conversation"];
+    const args: string[] = [...subcommandPrefix, "new-conversation"];
     if (options.job.agent.model) {
       args.push(`--model=${options.job.agent.model}`);
     }
@@ -952,7 +957,7 @@ export async function runAgentApiUi(
     const tPath = transcriptFilePath(appDataDir, session);
     highWaterMark = await readTranscriptLineCount(tPath);
 
-    const args = ["send-message", session, prompt];
+    const args = [...subcommandPrefix, "send-message", session, prompt];
     const cliResult = await execAgentApiCli(bin, args, {
       cwd: expandedCwd,
       env: sanitizedEnv,

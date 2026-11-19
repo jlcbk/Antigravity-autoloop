@@ -4,7 +4,7 @@
       "command": "sh",
       "args": [
         "-c",
-        "exec node --disable-warning=ExperimentalWarning \"${PLUGIN_ROOT:-.}/mcp/server.mjs\""
+        "PATH=\"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH\" exec node --disable-warning=ExperimentalWarning \"${PLUGIN_ROOT:-.}/mcp/server.mjs\""
       ]
     }
   }

@@ -783,4 +783,52 @@ describe("agentapi-runner (interactive UI session wake & transcript watch)", () 
     assert.equal(cliTimeoutRes.session, null);
     assert.match(cliTimeoutRes.error ?? "", /超时/);
   });
+
+  it("prepends 'agentapi' subcommand when ANTIGRAVITY_AGENTAPI_EXE points to language_server", async () => {
+    const dir = createTempDir("autoloop-ls-bin-");
+    const appDataDir = path.join(dir, "appdata");
+    const argvLog = path.join(dir, "argv.json");
+
+    const fakeLs = makeScript(
+      dir,
+      "language_server",
+      `
+      import { writeFileSync, mkdirSync } from "node:fs";
+      import path from "node:path";
+      writeFileSync(${JSON.stringify(argvLog)}, JSON.stringify(process.argv.slice(2)), "utf8");
+      if (process.argv[2] !== "agentapi" || process.argv[3] !== "new-conversation") {
+        process.stderr.write("Language server failed - Failed to read initial metadata from stdin\\n");
+        process.exit(2);
+      }
+      const session = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+      const logDir = path.join(${JSON.stringify(appDataDir)}, "brain", session, ".system_generated", "logs");
+      mkdirSync(logDir, { recursive: true });
+      const step = JSON.stringify({
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        status: "DONE",
+        content: "已完成 language_server agentapi 子命令测试。"
+      }) + "\\n";
+      writeFileSync(path.join(logDir, "transcript.jsonl"), step, "utf8");
+      writeFileSync(path.join(logDir, "transcript_full.jsonl"), step, "utf8");
+      process.stdout.write(session + "\\n");
+      `,
+    );
+
+    const res = await runAgentApiUi({
+      job: makeJob({
+        agent: { id: "ui", name: "UI", runner: "agentapi-ui", model: "gemini-4-hydrogen-low" },
+        session: null,
+      }),
+      contextFile: path.join(dir, "c.json"),
+      guardFile: path.join(dir, "g.json"),
+      baseEnv: { ...process.env, ANTIGRAVITY_AGENTAPI_EXE: fakeLs },
+      appDataDir,
+      pollIntervalMs: 20,
+      timeoutMs: 3000,
+    });
+
+    assert.equal(res.outcome, "done");
+    assert.equal(res.session, "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+  });
 });

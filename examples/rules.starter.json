@@ -14,6 +14,7 @@
     "probe": { "name": "Health Probe" },
     "git": { "name": "Git Delivery" },
     "idea": { "name": "Idea Factory" },
+    "video": { "name": "AI Video Studio" },
     "watch": { "name": "Local File Watch" }
   },
   "agents": {
@@ -113,6 +114,21 @@
       "parallel": 2,
       "resume": true,
       "emits": { "source": "manual", "types": ["sop.ready"] }
+    },
+    {
+      "name": "ai-video-studio",
+      "when": { "source": "video", "types": ["video.idea", "video.*"] },
+      "to": "carbon-architect",
+      "cwd": "~/Documents/Projects/your-project",
+      "skill": "recipe-ai-video-studio",
+      "title": "video-{subject}",
+      "group": "video-studio",
+      "parallel": 2,
+      "resume": true,
+      "emits": {
+        "source": "video",
+        "types": ["video.stage.done", "video.master.ready"]
+      }
     },
     {
       "name": "pr-delivery",

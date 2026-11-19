@@ -3,4 +3,5 @@ node_modules/
 *.db-wal
 *.db-shm
 .autoloop/
+video-projects/
 .DS_Store

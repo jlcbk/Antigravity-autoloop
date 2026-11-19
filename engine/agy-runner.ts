@@ -92,7 +92,7 @@ function expandCwd(cwd: string): string {
  * Build CLI arguments for `agy --print --output-format stream-json` without shell interpolation.
  */
 export function buildAgyArgs(job: Job, prompt: string): string[] {
-  const args: string[] = ["--print", "--output-format", "stream-json"];
+  const args: string[] = ["--output-format", "stream-json"];
 
   if (typeof job.agent.model === "string" && job.agent.model.length > 0) {
     args.push("--model", job.agent.model);
@@ -115,7 +115,7 @@ export function buildAgyArgs(job: Job, prompt: string): string[] {
     args.push("--mode", "accept-edits", "--sandbox");
   }
 
-  args.push(prompt);
+  args.push("--print", prompt);
   return args;
 }
 

@@ -29,6 +29,7 @@
 | **04**   | [docs/04-development-workflow-and-roadmap.md](./docs/04-development-workflow-and-roadmap.md)       | 标准研发流程（SDLC）、6 阶段里程碑（M0–M5）、分支与工作树（`workspace: "share"`）集成规范、阶段准出标准（DoD）与风险矩阵                 | 协调者（Coordinator）、合并守门人        |
 | **05**   | [docs/05-subagent-wbs-and-hydrogen-guide.md](./docs/05-subagent-wbs-and-hydrogen-guide.md)         | **6 波次 × 22 个原子工作包（WP-01 ~ WP-22）超细颗粒度拆解**、零文件冲突所有权矩阵、`Gemini 4 Hydrogen` 调度实操指南与即拷即用 Brief 模板 | 协调者、全体 Hydrogen 子代理             |
 | **06**   | [docs/06-testing-verification-and-acceptance.md](./docs/06-testing-verification-and-acceptance.md) | 五层测试金字塔：纯洁性门禁、状态机单元测试、20 万步确定性随机模拟与强杀恢复测试、Antigravity 桩集成测试、真机 `try` 端到端验收手册       | 测试子代理、验证子代理（Verifier）       |
+| **07**   | [docs/07-ai-video-production-sop.md](./docs/07-ai-video-production-sop.md)                         | 从一句话想法到 1080p 成片：AI 视频低抽卡率九阶段 SOP（错误前置漏斗、零上下文盲审、首尾帧差分、七段式提示词、代码救片与精密后期）         | 视频创作用户、总导演与盲审子代理         |
 
 ---
 
@@ -46,7 +47,7 @@ Antigravity-autoloop/
 ├── package.json                       # 零 dependencies，仅含 TypeScript 类型检查与 Node 24 测试脚本
 ├── tsconfig.json                      # Node 24 原生 TypeScript (erasableSyntaxOnly) 配置
 ├── bin/autoloop.mjs                   # 命令行可执行入口
-├── docs/                              # 完整工程研发文档体系（01 ~ 06）
+├── docs/                              # 完整工程研发与专项生产 SOP 文档体系（01 ~ 07）
 ├── examples/rules.starter.json        # 开箱即用的多模型角色与场景规则样板
 ├── rules/AGENTS.md                    # 插件启用时注入的精简 Autoloop 协同规则 (<2KB)
 ├── skills/
@@ -56,7 +57,8 @@ Antigravity-autoloop/
 │   ├── recipe-code-sweep/SKILL.md     # 内置场景 3：周期性代码大扫除与死代码清理
 │   ├── recipe-pr-delivery/SKILL.md    # 内置场景 4：本地/GitHub 分支异构审查与自动交付
 │   ├── recipe-health-watch/           # 内置场景 5：零 Token 静默探针巡检与异常自愈
-│   └── recipe-idea-to-sop/SKILL.md    # 内置场景 6：新观点/外部教程拆解试跑与固化流
+│   ├── recipe-idea-to-sop/SKILL.md    # 内置场景 6：新观点/外部教程拆解试跑与固化流
+│   └── recipe-ai-video-studio/        # 内置场景 7：从想法到 1080p 成片低抽卡率 AI 制片厂（含 QA 脚本）
 ├── protocol/                          # 冻结协议层：Schema、输入校验、回执解析、无外部依赖类型
 ├── kernel/                            # 纯函数确定性内核：decide / evolve / store(node:sqlite) / cron / due
 ├── engine/                            # Antigravity 原生执行器：agy -p 会话适配器、agentapi 唤醒器、command 探针
