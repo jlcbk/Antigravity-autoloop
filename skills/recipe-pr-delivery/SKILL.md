@@ -37,7 +37,7 @@ description: >-
    - 当进入**第 2+ 轮复审**且上一轮存在未决 `blocking` 问题时，若上一轮已审提交 `prevSha` 是当前 `headSha` 在同一分叉基线上的合法祖先，自动额外提取 `prevSha..headSha` 增量补丁（`incremental-diff.patch`）。
 2. **跨模型与跨厂商真异构只读互审（`selectHeterogeneousReviewerModel` & `reviewerRunner`）**：
    - **默认同端异构互审（`reviewerRunner: "agy-print"` 或省略）**：作者模型为 `hydrogen` 系列时默认切换 `gemini-4-carbon-high` 审查；作者模型为 `carbon` / `claude` / `opus` / `sonnet` 或未指明时默认切换 `gemini-4-hydrogen-xhigh` 审查（亦可通过 `.autoloop/delivery.json` 的 `reviewerModels` 显式映射）。
-   - **跨厂商真异构只读盲审（`reviewerRunner`）**：可在主干 `.autoloop/delivery.json` 中显式配置 `reviewerRunner`（如 `"codex"`、`"claude"` 或 `"acp"`）与 `reviewerCommand`，将 **Gemini / Claude 开发分支交由外部 OpenAI Codex（`codex exec --sandbox read-only`）或 OpenCode ACP（`opencode acp` + 协议层只读权限拦截）执行零历史上下文的真异构盲审**，彻底消除同源模型家族的共性盲区。
+   - **跨厂商真异构只读盲审（`reviewerRunner`）**：可在主干 `.autoloop/delivery.json` 中显式配置 `reviewerRunner`（如 `"codex"`、`"claude"` 或 `"acp"`）与 `reviewerCommand`，将 **Gemini / Claude 开发分支交由外部 OpenAI Codex（`codex exec -s read-only`）或 OpenCode ACP（`opencode acp` + `terminal: false` 协议层只读权限拦截）执行零历史上下文的真异构盲审**，彻底消除同源模型家族的共性盲区。
 3. **两级审查准则与降误报纪律**：
    - **必填真实触发路径（`how`）**：每条 `"severity": "blocking"` 发现必须在 `detail` / `text` 或专用 `how` 字段中写明**在当前调用链下如何发生的真实触发路径**；说不出具体触发路径的理论担忧或多重极端巧合竞态一律归为非阻塞 `"warning"` / `"info"`，严禁阻断合并。
    - **同类问题归并单条**：同一成因或同类缺陷必须合并为单条 finding（列出全部涉及的文件与行号），禁止拆成多条刷屏。
@@ -47,7 +47,7 @@ description: >-
    - 第 2+ 轮默认向审查模型提供 `incremental-diff.patch` 与上一轮未决 `blocking` 清单：仅核查 ① 上轮阻塞项是否真正修复、② 本轮修复或新增代码是否引入新阻塞缺陷，**严禁在未改动的历史旧代码中翻找新边角问题拉锯**。
    - **纯 `*.md` 修改防蒙混回退（`docs_only`）**：若上一轮存在代码级阻塞问题，但本轮增量提交仅修改了 Markdown 文档（`*.md`），系统自动回退提供完整分支 `diff.patch` 供审查模型对照全量代码核实，严防仅靠改文档绕过代码修复。
 5. **跨分支名 SHA 幂等缓存与默认 2 轮熔断转人工**：
-   - 审查账本（`review-ledger.json`）按 **`(headSha, mergeBaseSha, reviewerModel)`** 解耦分支名进行幂等缓存：同一提交 SHA 即使重命名分支或跨分支投递也直接命中缓存，绝不重复消耗 Token 重审。
+   - 审查账本（`review-ledger.json`）按 **`(headSha, mergeBaseSha, reviewerRunner, reviewerCommand, reviewerModel)`** 解耦分支名并隔离不同审查执行器进行幂等缓存：同一提交 SHA 即使重命名分支或跨分支投递也直接命中缓存，绝不重复消耗 Token 重审。
    - 若存在 `blocking` 发现项且未达轮次上限：发出衍生事件 `git.review.changes_requested` 退回上游修复分支（携带 `fyi: true` 通知）。
    - 若同一分支达到或超过 `maxReviewRounds`（**默认为 `2` 轮**，可通过 `.autoloop/delivery.json` 覆盖）仍未通过：自动升级为一张 `ask` 奏折卡（`key: delivery:review:<targetRef>:<headSha>`），选项为 `["人工放行继续合并", "退回并搁置分支"]`，进程退出零消耗等待人工裁决。
 
@@ -119,9 +119,9 @@ description: >-
 | `reviewerRunner` 取值     | `reviewerCommand` 规则                             | 典型跨厂商盲审场景与安全沙箱机制                                                                                                 |
 | :------------------------ | :------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
 | `"agy-print"`（默认可省） | **严禁配置**（配置即报错）                         | Antigravity 内生 Hydrogen ↔ Carbon 异构模型只读沙箱（`--mode plan --sandbox`）互审。                                             |
-| `"codex"`                 | 可选自定义前缀数组（如 `["codex"]`）               | **Gemini / Claude 代码由 OpenAI Codex 跨厂商盲审**，强制运行于 `--sandbox read-only` 无记忆只读模式。                            |
-| `"claude"`                | 可选自定义前缀数组（如 `["zcode"]`、`["dsh"]`）    | **Gemini / OpenAI 代码由 Claude Code / ZCode 跨厂商盲审**，强制只读工具集与无会话残留。                                          |
-| `"acp"`                   | **必填**非空字符串数组（如 `["opencode", "acp"]`） | **通过通用 ACP 协议调用 OpenCode / Qwen / Kimi 盲审**，在 JSON-RPC `session/request_permission` 层强制拒绝一切写文件与危险命令。 |
+| `"codex"`                 | 可选自定义前缀数组（如 `["codex"]`）               | **Gemini / Claude 代码由 OpenAI Codex 跨厂商盲审**，强制运行于 `-s read-only` 无记忆只读模式。                                                                                                      |
+| `"claude"`                | 可选自定义前缀数组（如 `["zcode"]`、`["dsh"]`）    | **Gemini / OpenAI 代码由 Claude Code / ZCode 跨厂商盲审**，强制 `--permission-mode plan` 只读模式与无会话残留。                                                                                     |
+| `"acp"`                   | **必填**非空字符串数组（如 `["opencode", "acp"]`） | **通过通用 ACP 协议调用 OpenCode / Qwen / Kimi 盲审**，声明 `fs.writeTextFile: false`、`terminal: false`，并在 `session/request_permission` 与 `fs/*` 层结合 `guard.json` 执行严格只读白名单与 `<AUTOLOOP_HOME>` 隔离。 |
 
 ---
 

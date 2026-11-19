@@ -79,10 +79,10 @@ Antigravity-autoloop/
 │   ├── context-file.ts                # 生成每轮隔离的 context.json 与 guard.json（0600 权限 + 否定批复防误授权限）
 │   ├── agy-runner.ts                  # 调用 `agy -p --output-format stream-json --conversation ...`（含流式 result 后 30s 宽限回收）
 │   ├── agentapi-runner.ts             # 调用 `agentapi new-conversation / send-message` + transcript 监听
-│   ├── codex-runner.ts                # 调用 `codex exec --json` / `exec resume`（原生内核沙箱映射 + reasoning effort + 30s 宽限回收）
-│   ├── claude-runner.ts               # 调用 `claude` / `zcode` / `dsh` `-p --verbose --output-format stream-json` + `--resume`
-│   ├── acp-runner.ts                  # 通用 Agent Client Protocol（NDJSON JSON-RPC 2.0，通吃 opencode/gemini/qwen/goose/kimi + 协议级权限拦截）
-│   ├── herdr-runner.ts                # 交互式常驻 tmux 窗格 / `--machine` 远程执行器（target 选择器 + 0600 文件无损交接 + 屏幕缓冲回执提取）
+│   ├── codex-runner.ts                # 调用 `codex exec` / `exec ... resume`（-s 沙箱映射 + -o 兜底采集 + reasoning effort + 30s 宽限回收）
+│   ├── claude-runner.ts               # 调用 `claude` / `zcode` / `dsh` `-p --verbose --output-format stream-json` + `--resume`（含 #271 缓存 Token 归一化）
+│   ├── acp-runner.ts                  # 通用 Agent Client Protocol（双帧 JSON-RPC 2.0，terminal: false + session/request_permission & fs/* 护栏）
+│   ├── herdr-runner.ts                # 交互式常驻 tmux 窗格 / `--machine` 远程执行器（Reuse-First 选择器 + agent prompt --wait + 本机 0600 交接/远端增量捕获 + esc 安全中断）
 │   ├── command-runner.ts              # 零 Token 本地脚本执行器（execFile 参数数组隔离）
 │   └── supervisor.ts                  # Worker 领单、心跳续租、多引擎派发、坏会话自动降级、回执二次修复与 discardReceipt 兜底结案
 ├── hooks/                             # [Antigravity 生命周期硬护栏]
@@ -389,17 +389,17 @@ export interface RunResult extends Receipt {
    - 权限档位映射：`read` → `["--mode", "plan", "--sandbox"]`，`edit`（默认）→ `["--mode", "accept-edits", "--sandbox"]`，`full` → `["--mode", "auto"]`；
    - `agentapi-runner.ts` 调用客户端 `new-conversation` / `send-message` 并监听 transcript 完结。
 4. **外部原生流式双执行器（`codex-runner.ts` & `claude-runner.ts`）**：
-   - **`codex-runner.ts`**：调用 `agent.command ?? ["codex"]` 执行 `exec --json`（续接时为 `exec resume <thread_id> --json`）；`access` 严格映射至原生内核沙箱（`read` → `--sandbox read-only`，`edit` → `--sandbox workspace-write`，`full` → `--sandbox danger-full-access`），`effort` 映射为 `-c model_reasoning_effort=<level>`，从 JSONL 事件流提取 `thread.started.thread_id`、助手消息与 `turn.completed.usage`。
-   - **`claude-runner.ts`**：调用 `agent.command ?? ["claude"]`（无缝兼容 `["zcode"]`、`["dsh"]` 等兼容 CLI）执行 `-p --verbose --output-format stream-json`（续接时加 `--resume <session_id>`），按 `access` 档位约束工具与权限模式，提取 `session_id`、最终回复与成本统计。
+   - **`codex-runner.ts`**：调用 `agent.command ?? ["codex"]` 执行 `exec [parentFlags] --json -o <lastMsgFile> -`（续接时父级参数置于 `resume` 之前：`exec -C <cwd> --skip-git-repo-check --color never <sandboxFlag> resume --json -o <lastMsgFile> ... <thread_id> -`，经 `stdin` 投递提示词）；`access` 严格映射至原生沙箱参数（`read` → `-s read-only`，`edit` → `-s workspace-write`，`full` → `--dangerously-bypass-approvals-and-sandbox`），`effort` 映射为 `-c model_reasoning_effort="<level>"`（`max` 归一为 `xhigh`），从 JSONL 事件流与 `-o` 末条消息文件提取 `thread_id`、助手消息与 `turn.completed.usage`。
+   - **`claude-runner.ts`**：调用 `agent.command ?? ["claude"]`（无缝兼容 `["zcode"]`、`["dsh"]` 等兼容 CLI，启动时自动剥离 `CLAUDECODE` 与 `CLAUDE_CODE_ENTRYPOINT`）执行 `-p --verbose --output-format stream-json`（续接时加 `--resume <session_id>`，经 `stdin` 投递提示词），按 `access` 档位映射权限模式（`read` → `plan`，`edit` → `acceptEdits`，`full` → `bypassPermissions` + `--allow-dangerously-skip-permissions`），并执行 `#271` 缓存 Token 归一化（`totalInput = input_tokens + cacheRead + cacheCreate`，确保 `cached <= input`）提取 `session_id`、最终回复与成本统计。
 5. **通用 `acp` 万能协议执行器（`acp-runner.ts`）**：
-   - 通过 `spawn(command[0], command.slice(1), { shell: false })` 启动任意兼容 Agent Client Protocol 的子进程（如 `["opencode", "acp"]`、Gemini CLI、Qwen Code、Goose、Kimi CLI），经 stdio NDJSON JSON-RPC 2.0 依次执行 `initialize` → `session/load`（无历史会话或不支持时回退 `session/new`）→ `session/prompt`；
-   - **协议层 `session/request_permission` 硬门禁**：在 JSON-RPC 回调层实时审计工具权限请求——凡触碰三层控制面密级文件（`guard.json` / `*.token` / `master.key` / `ipc.json` / `hub.db*` 写操作）、违反 `access === "read"` 只读限制，或命中未获 `approvedKeys` 授权的 `askFirst` 高危命令，一律返回 `reject_once`（无拒绝项时取消）。
+   - 通过 `spawn(command[0], command.slice(1), { detached: true, shell: false })` 启动任意兼容 Agent Client Protocol 的子进程（如 `["opencode", "acp"]`、Gemini CLI、Qwen Code、Goose、Kimi CLI），经 stdio 双帧 JSON-RPC 2.0（兼容 NDJSON 与 `Content-Length` 字节分帧）依次执行 `initialize` → `session/load`（无历史会话或不支持时回退 `session/new`）→ `session/prompt`；
+   - **`clientCapabilities` 与协议层 `session/request_permission` / `fs/*` 硬门禁**：`initialize` 显式声明 `fs.readTextFile: true`、`fs.writeTextFile: access !== "read"`、`terminal: false`（Shell 命令统一经由 ACP 智能体内置 Shell 工具发起并由 `session/request_permission` + `guard.json` 审计，不暴露无门禁宿主终端委托）；在 `session/request_permission`、`fs/read_text_file` 与 `fs/write_text_file` 回调层实时核验 `guard.json`（缺失或损坏即 fail-closed 拒绝）——凡触碰三层控制面密级文件（`guard.json` / `*.token` / `master.key` / `ipc.json` / `hub.db*` 写操作）、命中 `<AUTOLOOP_HOME>` `external_directory` 或受保护子路径越界、违反 `access === "read"` 严格只读工具白名单，或命中未获 `approvedKeys` 授权的 `askFirst` 高危命令，一律拒绝（权限请求返回 `reject_once`，无拒绝项时取消）。
 6. **`herdr` 交互式常驻窗格/远程机器特种执行器（`herdr-runner.ts`）**：
-   - 调用 `agent.command ?? ["herdr"]`（支持 `["herdr", "--machine", "<host>"]` 跨机 SSH 调度），按 `agent.target` 解析目标窗格（精确 ID `"w3:p1"`、别名 `"reviewer"`、空闲类型匹配 `"kind:codex"` 或动态拉起 `"spawn:opencode"`）；
-   - **无损文件交接（File-Based Handoff）**：将完整任务提示词与 `context.json` 路径以 `0600` 权限写入运行目录私有指令文件，仅向交互窗格注入短读取指令与唯一完成哨兵，规避 tmux `send-keys` 长文本多行转义截断，随后轮询窗格空闲态并通过 `pane read` 屏幕回滚缓冲提取末尾 `agent-autoloop` 回执。
+   - **Reuse-First 目标解析与弹窗清理**：调用 `agent.command ?? ["herdr"]`（支持 `["herdr", "--machine", "<host>"]` 或 `--remote` 跨机 SSH 调度），按复用优先顺序解析目标窗格（续接原 `herdr:wX:pY` 会话 → 精确窗格 ID `"w3:p1"` / 具名 Agent `"reviewer"` → `"kind:<kind>"` 空闲匹配 → `"spawn:<kind>"` 通过 `agent spawn --no-focus` 无抢焦点按需拉起），派发前检测可视屏面并自动发送 `esc` 清理残留 OpenCode 模态弹窗；
+   - **参数隔离派发、双模无损采集与安全中断**：通过 `herdr agent prompt <paneId> <wrappedPrompt> --wait`（`shell: false` 参数隔离，提示词中 `summary`/`detail` 保持 0 字节拼接）派发任务；本机模式使用权限 `0600` 的 `herdr-handoff-attempt-<N>.md` 无损交接文件并以 `agent read --source recent-unwrapped` 未折行回滚增量兜底，`--machine` / `--remote` 跨机 SSH 模式（SSH 可达时）预投递 `0600` 只读远端上下文文件并直接从 `agent read --source recent-unwrapped` 终端增量捕获完整回复与末尾 `agent-autoloop` JSON 回执；收到 `AbortSignal` 取消时仅发送 `herdr agent send-keys <paneId> esc` 中断当前生成（绝不停止 `herdr server` 或关闭用户窗格），若续接的 `herdr:wX:pY` 窗格存活但暂时处于忙碌状态则在退避重试期间保留原窗格会话。
 7. **流式完结后 `30s` 退出宽限回收（`postResultGraceMs`）**：当流式执行器已收到非错误的最终完成帧（如 `agy` `result` 或 `codex` `turn.completed`）后，立即启动默认 `30s` 宽限计时器；若后台残留孙进程仍持有管道未退，期满后主动向进程组发送 `SIGTERM`→`SIGKILL` 回收并按已收到的成功结果结算。
 8. **坏历史会话自动降级与延迟 `session` 补报（`supervisor.ts`）**：
-   - 当携带非空 `job.session` 启动但尚未进入有效启动态即非零退出（`!started && !cancelled && !timedOut && exitCode !== 0`）时，自动降级清空 `session: null` 开启全新会话重跑本轮；若流首帧无会话 ID 而后续帧提取到真实会话标识，自动二次调用 `markStarted` 补报。
+   - 当携带非空 `job.session` 启动但因历史会话已失效而未启动即非零退出（`!started && !cancelled && !timedOut && exitCode !== 0`）时，自动降级清空 `session: null` 开启全新会话重跑本轮（注：若目标窗格如 `herdr:wX:pY` 确认存活仅暂时忙碌，则保留原 `session` 交由退避重试续接，不清空会话）；若流首帧无会话 ID 而后续帧提取到真实会话标识，自动二次调用 `markStarted` 补报。
 9. **回执二次原地修复与 `discardReceipt` 安全降级结案（`supervisor.ts`）**：
    - 当 `exitCode === 0` 且 `parsed.problem !== null` 且存在可续接 `session` 时，最多在原会话发送 **2 次** `repairPrompt(problem)` 仅重写最后一条消息（累加各次 Token `usage`）。
    - 若首轮业务已完成（`exitCode === 0` 且首行结论为 `done` 或 `nothing`），但 2 次修复耗尽后回执仍存在格式/校验错误（或无可用 `session` 无法修复），必须执行 **`discardReceipt` 安全降级**：保留首轮 `done` / `nothing` 结论与摘要正常结案（当结论为 `done` 时自动附带一张标题为「回执格式损坏已忽略」的 `open` 告警通知卡），**严禁将其标为 `failed` 触发最多 10 次整轮重跑导致业务副作用重复执行**。
@@ -429,7 +429,7 @@ export interface RunResult extends Receipt {
    - 第 2 轮起若传入上轮已审 `previousReviewedSha`，`extractIncrementalDiff()` 校验其与 `headSha` 不同、满足 `git merge-base --is-ancestor prevSha headSha` 且同属当前 `mergeBaseSha` 谱系后，生成 `prevSha..headSha` 的 `0600` 权限 `incremental-diff.patch`；若上一轮存在代码级阻塞缺陷但本轮增量仅修改了 `*.md` 文档（`docs_only`），或分支发生 rebase 改写历史（`not_ancestor` / `merge_base_drift`），自动清理增量补丁并安全回退至完整分支 `diff.patch`。
 2. **同端/跨厂商异构模型路由、轮次上限与跨分支名 SHA 缓存（`delivery/reviewer.ts`）**：
    - 作者模型含 `hydrogen` 默认派给 `gemini-4-carbon-high`，含 `carbon`/`claude`/`opus`/`sonnet` 或未指定默认派给 `gemini-4-hydrogen-xhigh`（支持 `delivery.json` 的 `reviewerModels` 与 `reviewerRunner` 覆盖为 OpenAI `codex` / `claude` / `opencode acp` 跨厂商只读盲审），始终以无状态只读沙箱（`access: "read"`，不续接历史会话）运行，单轮默认超时 **`30` 分钟**（`DEFAULT_REVIEW_TIMEOUT_MS`）。
-   - 审查账本按 **`(headSha, mergeBaseSha, reviewerModel)`** 匹配幂等缓存（与分支名解耦，重命名分支绝不重审同一提交）；默认最大审查轮次 **`DEFAULT_MAX_REVIEW_ROUNDS = 2`**，第 2 轮仍有 `blocking` 发现或超出上限时状态置为 `escalated_to_human`，由 `pipeline.ts` 自动转为人工 `ask` 批奏折卡片。
+   - 审查账本按 **`(headSha, mergeBaseSha, reviewerRunner, reviewerCommand, reviewerModel)`** 匹配幂等缓存（与分支名解耦，重命名分支绝不重审同一提交，同时严格隔离不同跨厂商审查通道与命令配置）；默认最大审查轮次 **`DEFAULT_MAX_REVIEW_ROUNDS = 2`**，第 2 轮仍有 `blocking` 发现或超出上限时状态置为 `escalated_to_human`，由 `pipeline.ts` 自动转为人工 `ask` 批奏折卡片。
    - **定向增量复审与防拉锯纪律**：第 2 轮起自动附带第 1 轮未决 `blockingFindings`（`file`、`line`、`title`、`detail`、`how`），要求逐条核实修复情况并检查新改动是否引入新缺陷，**严禁在未触碰的历史代码中翻找新边角问题拉锯**。
    - **两级发现与测试分节轻读**：每条 `blocking` 缺陷必须写明当前调用链下的具体触发路径（`detail` / `how`），同类成因归并为单条，`warning` / `info` 不阻断合并；普通测试文件（`tests/*.test.ts`）归入分节轻读（只查行为覆盖不挑风格），而安全与纯洁性门禁测试（`tests/purity.test.ts`、`tests/security-isolation.test.ts` 等及命中 `sensitivePaths` 的测试）维持严审防门禁弱化。
 

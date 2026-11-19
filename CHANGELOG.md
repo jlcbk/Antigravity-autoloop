@@ -9,21 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/
 
 ## [1.2.0] - 2026-11-20
 
-本版本正式将执行层升级为 **「八模全通道执行矩阵（后台正规军 + 前台特种兵）」**，在不改动纯函数内核（`kernel/` 零修改）且保持零第三方运行时依赖的前提下，新增 **`codex`、`claude`（兼容 `zcode`/`dsh`）、`acp`（通用 Agent Client Protocol 万能口）、`herdr`（交互式常驻窗格/远程机器特种通道）** 四大外部执行器，并支持在本地分支交付流水线中配置 **跨厂商异构只读代码盲审（`reviewerRunner`）**。
+本版本正式将执行层升级为 **「八模全通道执行矩阵（后台正规军 + 前台特种兵）」**，在不改动纯函数内核（`kernel/` 零修改）且保持零第三方运行时依赖的前提下，新增 **`codex`、`claude`（兼容 `zcode`/`dsh`）、`acp`（通用 Agent Client Protocol 万能口）、`herdr`（交互式常驻窗格/远程机器特种通道）** 四大外部执行器，并支持在本地分支交付流水线中配置 **跨厂商异构只读代码盲审（`reviewerRunner`）**。全仓自动化测试扩展至 **66 个测试套件、230+ 个用例**。
 
 ### Added
 
 - **外部原生流式双执行器 `codex` 与 `claude`（`engine/codex-runner.ts`、`engine/claude-runner.ts`）**：
-  - **`codex` 执行器**：原生对接 OpenAI Codex CLI（`codex exec --json` / `codex exec resume <thread_id> --json`），将 `access` 档位严格映射至内核沙箱（`read` → `--sandbox read-only`，`edit` → `--sandbox workspace-write`，`full` → `--sandbox danger-full-access`），支持 `model`、`effort`（`-c model_reasoning_effort=...`）透传、流式 `thread_id` 会话续接、Token `usage` 采集以及 `30s` `turn.completed` 退出宽限回收；
-  - **`claude` 执行器**：原生对接 Claude Code 及兼容包装命令（支持通过 `command: ["zcode"]` 或 `["dsh"]` 自定义可执行前缀），采用 `-p --verbose --output-format stream-json` 流式协议与 `--resume <session_id>` 无损会话续接，按 `access` 档位映射权限模式并提取 `session_id`、最终回复与成本用量。
+  - **`codex` 执行器**：原生对接 OpenAI Codex CLI（`codex exec [parentFlags] --json -o <lastMsgFile> -` / `codex exec [parentFlags] resume --json -o <lastMsgFile> <thread_id> -`，确保 `-C`、`--skip-git-repo-check`、`--color never` 与沙箱标志位于 `resume` 之前），将 `access` 档位严格映射至原生沙箱参数（`read` → `-s read-only`，`edit` → `-s workspace-write`，`full` → `--dangerously-bypass-approvals-and-sandbox`），支持 `model`、`effort`（`-c model_reasoning_effort=...`）透传、`-o` 末条消息文件兜底采集、流式 `thread_id` 会话续接、Token `usage` 采集以及 `30s` `turn.completed` 退出宽限回收；
+  - **`claude` 执行器**：原生对接 Claude Code 及兼容包装命令（支持通过 `command: ["zcode"]` 或 `["dsh"]` 自定义可执行前缀，启动时自动剥离 `CLAUDECODE` / `CLAUDE_CODE_ENTRYPOINT`），采用 `-p --verbose --output-format stream-json` 流式协议与 `--resume <session_id>` 无损会话续接，按 `access` 档位映射权限模式，并执行 `#271` 缓存 Token 归一化（`totalInput = input_tokens + cacheRead + cacheCreate`，确保 `cached <= input`）提取 `session_id`、最终回复与成本用量。
 - **通用 `acp` 万能协议执行器与协议层安全门禁（`engine/acp-runner.ts`）**：
-  - 基于标准 Agent Client Protocol（stdio NDJSON JSON-RPC 2.0：`initialize` → `session/new` 或 `session/load` → `session/prompt`），一套适配器通吃 OpenCode（`command: ["opencode", "acp"]`）、Gemini CLI、Qwen Code、Goose、Kimi CLI 等所有 ACP 兼容智能体，当 `session/load` 不受支持或失败时优雅回退 `session/new`；
-  - **协议层 `session/request_permission` 硬安全门禁**：在 JSON-RPC 服务端回调层直接对工具调用请求执行三层控制面自保护（封锁 `guard.json`/`*.token`/`master.key`/`ipc.json` 与 `hub.db*` 写操作）、`access: "read"` 写操作拦截以及未获 `approvedKeys` 授权的 `askFirst` 高危命令拒绝（自动选择 `reject_once` 选项，无拒绝项时取消请求）。
-- **`herdr` 交互式常驻窗格/远程机器特种执行器与无损文件交接（`engine/herdr-runner.ts`）**：
-  - 对接 `herdr` tmux 窗格编排器，支持精确窗格 ID（`"w3:p1"`）、自定义别名（`"reviewer"`）、类型匹配（`"kind:codex"`）与按需拉起（`"spawn:opencode"`）四类 `target` 选择器，并支持通过 `command: ["herdr", "--machine", "<host>"]` 跨机器派发远程任务；
-  - **无损文件交接（File-Based Handoff）**：将完整任务提示词与 `context.json` 路径原子写入权限 `0600` 的运行级指令文件，仅向目标交互窗格发送短路径读取指令与唯一完成哨兵，彻底规避长文本多行 JSON 经 tmux `send-keys` 注入时的转义损坏与截断，再通过窗格状态轮询与 `pane read` 屏幕回滚缓冲精准提取末尾 `agent-autoloop` 回执。
+  - 基于标准 Agent Client Protocol（stdio 双帧 JSON-RPC 2.0，兼容 NDJSON 与 `Content-Length`：`initialize` → `session/new` 或 `session/load` → `session/prompt`），握手中显式声明 `clientCapabilities` 为 `fs.readTextFile: true`、`fs.writeTextFile: access !== "read"`、`terminal: false`（Shell 命令统一经由 ACP 智能体内置 Shell 工具发起并受 `session/request_permission` + `guard.json` 门禁管控），一套适配器通吃 OpenCode（`command: ["opencode", "acp"]`）、Gemini CLI、Qwen Code、Goose、Kimi CLI 等所有 ACP 兼容智能体，当 `session/load` 不受支持或失败时优雅回退 `session/new`；
+  - **协议层 `session/request_permission` 与 `fs/*` 硬安全门禁**：在 JSON-RPC 服务端回调层结合 `guard.json`（损坏或缺失即 fail-closed 拒绝）执行三层控制面自保护（封锁 `guard.json`/`*.token`/`master.key`/`ipc.json` 与 `hub.db*` 写操作）、`<AUTOLOOP_HOME>` `external_directory` 与子路径越界封锁、`access: "read"` 严格只读工具白名单，以及未获 `approvedKeys` 授权的 `askFirst` 高危命令拒绝（自动选择 `reject_once` 选项，无拒绝项时取消请求）。
+- **`herdr` 交互式常驻窗格/远程机器特种执行器与双模输出采集（`engine/herdr-runner.ts`）**：
+  - 对接 `herdr` tmux 窗格编排器，遵循 **Reuse-First（复用优先）** 目标解析策略：支持精确窗格 ID（`"w3:p1"`）、具名 Agent（`"reviewer"`）、空闲类型匹配（`"kind:codex"`）与无抢焦点按需拉起（`"spawn:opencode"`，通过 `agent spawn --no-focus` 启动），派发前自动检测并发送 `esc` 清理残留 OpenCode 模态弹窗，并支持通过 `command: ["herdr", "--machine", "<host>"]`（或 `--remote`）跨机器 SSH 派单；
+  - **参数隔离派发、双模无损采集与安全中断**：通过 `herdr agent prompt <paneId> <wrappedPrompt> --wait`（`shell: false` 参数数组隔离，提示词 0 字节拼接外部 `summary`/`detail`）派发任务；本机模式优先读取 `0600` 权限 `herdr-handoff-attempt-<N>.md` 无损交接文件并以 `agent read --source recent-unwrapped` 终端未折行回滚增量兜底，`--machine` / `--remote` 远程模式（SSH 可达时）预投递 `0600` 只读远端上下文文件并直接从 `agent read --source recent-unwrapped` 终端增量流完整提取回复与 `agent-autoloop` JSON 回执；当续接的 `herdr:wX:pY` 窗格存活但暂时忙碌时跨退避重试保留原窗格会话，收到 `AbortSignal` 取消时仅发送 `herdr agent send-keys <paneId> esc` 中断当前生成，绝不停止 `herdr server` 或关闭用户窗格。
 - **跨厂商真异构代码盲审配置（`delivery/snapshot.ts`、`delivery/reviewer.ts`）**：
-  - `.autoloop/delivery.json` 新增可选字段 `reviewerRunner?: "agy-print" | "codex" | "claude" | "acp"`（省略时默认 `"agy-print"` 100% 向后兼容）与 `reviewerCommand?: string[]`（`acp` 必填，`codex`/`claude` 可选自定义前缀，`agy-print` 禁止配置），实现 Gemini / Claude 开发分支由 OpenAI Codex 或 OpenCode 跨厂商独立只读盲审。
+  - `.autoloop/delivery.json` 新增可选字段 `reviewerRunner?: "agy-print" | "codex" | "claude" | "acp"`（省略时默认 `"agy-print"` 100% 向后兼容）与 `reviewerCommand?: string[]`（`acp` 必填，`codex`/`claude` 可选自定义前缀，`agy-print` 禁止配置），并将审查幂等缓存键扩展为 `(headSha, mergeBaseSha, reviewerRunner, reviewerCommand, reviewerModel)` 隔离不同审查通道，实现 Gemini / Claude 开发分支由 OpenAI Codex 或 OpenCode 跨厂商独立只读盲审。
 - **八模角色池示例与全套管理技能升级（`examples/rules.starter.json`、`skills/`、`docs/03`）**：
   - `examples/rules.starter.json` 新增 `codex-worker`、`claude-worker`、`opencode-acp`、`herdr-pane` 四个开箱即用角色示例；同步升级 `autoloop-admin` 八种 `runner` 选型矩阵与 `recipe-pr-delivery` 跨厂商审查配置指南。
 
