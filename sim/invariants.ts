@@ -823,7 +823,8 @@ function checkRunLanesSessionsAndStopState(runs: readonly Row[]): {
   runsById: Map<number, Row>;
 } {
   const runsById = new Map<number, Row>();
-  const claimedByLane = new Map<string, number[]>();
+  const claimedByGroupLane = new Map<string, number[]>();
+  const claimedByRuleLane = new Map<string, number[]>();
   const queuedByLane = new Map<string, number[]>();
   const activeSessions = new Map<string, number>();
   const cancelledBySession = new Map<string, Row[]>();
@@ -874,22 +875,35 @@ function checkRunLanesSessionsAndStopState(runs: readonly Row[]): {
       }
     }
 
-    const laneKey = `${String(run.rule ?? "")}\0${String(run.lane ?? "")}`;
+    const ruleLaneKey = `${String(run.rule ?? "")}\0${String(run.lane ?? "")}`;
+    const grpName = String(run.grp || run.rule || "");
+    const grpLaneKey = `${grpName}\0${String(run.lane ?? "")}`;
 
-    // INV-05: Per-(rule, lane) single claimed & single non-cancelled queued
+    // INV-05: Per-(grp, lane) single claimed across rules in same group & per-(rule, lane) single non-cancelled queued
     if (status === "claimed") {
-      const list = claimedByLane.get(laneKey) ?? [];
-      list.push(runId);
-      if (list.length >= 2) {
+      const grpList = claimedByGroupLane.get(grpLaneKey) ?? [];
+      grpList.push(runId);
+      if (grpList.length >= 2) {
         fail(
           "INV-05",
-          `事项 (${String(run.rule)}, ${String(run.lane ?? "")}) 同时存在 ${list.length} 个 claimed 轮次: [${list.join(", ")}]`,
-          { rule: run.rule, lane: run.lane ?? "", runs: list },
+          `并发组事项 (${grpName}, ${String(run.lane ?? "")}) 同时存在 ${grpList.length} 个 claimed 轮次: [${grpList.join(", ")}]`,
+          { grp: grpName, rule: run.rule, lane: run.lane ?? "", runs: grpList },
         );
       }
-      claimedByLane.set(laneKey, list);
+      claimedByGroupLane.set(grpLaneKey, grpList);
+
+      const ruleList = claimedByRuleLane.get(ruleLaneKey) ?? [];
+      ruleList.push(runId);
+      if (ruleList.length >= 2) {
+        fail(
+          "INV-05",
+          `事项 (${String(run.rule)}, ${String(run.lane ?? "")}) 同时存在 ${ruleList.length} 个 claimed 轮次: [${ruleList.join(", ")}]`,
+          { rule: run.rule, lane: run.lane ?? "", runs: ruleList },
+        );
+      }
+      claimedByRuleLane.set(ruleLaneKey, ruleList);
     } else if (status === "queued" && run.cancel_at == null) {
-      const list = queuedByLane.get(laneKey) ?? [];
+      const list = queuedByLane.get(ruleLaneKey) ?? [];
       list.push(runId);
       if (list.length >= 2) {
         fail(
@@ -898,7 +912,7 @@ function checkRunLanesSessionsAndStopState(runs: readonly Row[]): {
           { rule: run.rule, lane: run.lane ?? "", runs: list },
         );
       }
-      queuedByLane.set(laneKey, list);
+      queuedByLane.set(ruleLaneKey, list);
     }
 
     // INV-06: Active session exclusive lock + cancelled session non-inheritance
@@ -1164,7 +1178,7 @@ function isInternalSystemEvent(
   if (
     type === "timer.due" &&
     TIMER_KEY_RE.test(key) &&
-    firedTimerEventIds.has(evId)
+    (firedTimerEventIds.has(evId) || typeof ev.timer_key === "string")
   ) {
     return true;
   }

@@ -26,10 +26,13 @@ export interface Store {
   readonly view: View;
   readonly fingerprint: string;
   commit(facts: readonly Fact[]): void;
+  commitLatest(decideFn: (view: View) => Fact | null): Fact | null;
   readFacts(afterSeq?: number, limit?: number): Fact[];
   queryAll<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[];
   close(): void;
 }
+
+export type KernelStore = Store;
 
 const META_FINGERPRINT = "fingerprint";
 const META_LAST_SEQ = "last_seq";
@@ -106,10 +109,37 @@ function parseFactRow(row: Record<string, unknown>): Fact {
   };
 }
 
-function createReadViews(db: DatabaseSync): void {
+const READ_VIEW_NAMES = [
+  "v_events",
+  "v_runs",
+  "v_cards",
+  "v_timers",
+  "v_schedules",
+  "v_pauses",
+  "v_skipped",
+] as const;
+
+function ensureSqlViews(
+  db: DatabaseSync,
+  options?: { replace?: boolean },
+): void {
+  const replace = options?.replace === true;
+  if (!replace) {
+    const row = db
+      .prepare(
+        "SELECT COUNT(*) AS cnt FROM sqlite_master WHERE type = 'view' AND name IN ('v_events','v_runs','v_cards','v_timers','v_schedules','v_pauses','v_skipped')",
+      )
+      .get() as { cnt: number };
+    if (Number(row.cnt) === READ_VIEW_NAMES.length) {
+      return;
+    }
+  }
+
+  const dropPrefix = (name: string) =>
+    replace ? `DROP VIEW IF EXISTS ${name};\n    CREATE VIEW ${name} AS` : `CREATE VIEW IF NOT EXISTS ${name} AS`;
+
   db.exec(`
-    DROP VIEW IF EXISTS v_events;
-    CREATE VIEW v_events AS
+    ${dropPrefix("v_events")}
     SELECT
       key AS proj_key,
       json_extract(data, '$.id') AS id,
@@ -125,8 +155,7 @@ function createReadViews(db: DatabaseSync): void {
     FROM projections
     WHERE collection = 'events';
 
-    DROP VIEW IF EXISTS v_runs;
-    CREATE VIEW v_runs AS
+    ${dropPrefix("v_runs")}
     SELECT
       key AS proj_key,
       json_extract(data, '$.id') AS id,
@@ -155,8 +184,7 @@ function createReadViews(db: DatabaseSync): void {
     FROM projections
     WHERE collection = 'runs';
 
-    DROP VIEW IF EXISTS v_cards;
-    CREATE VIEW v_cards AS
+    ${dropPrefix("v_cards")}
     SELECT
       key AS proj_key,
       json_extract(data, '$.id') AS id,
@@ -177,8 +205,7 @@ function createReadViews(db: DatabaseSync): void {
     FROM projections
     WHERE collection = 'cards';
 
-    DROP VIEW IF EXISTS v_timers;
-    CREATE VIEW v_timers AS
+    ${dropPrefix("v_timers")}
     SELECT
       key AS proj_key,
       json_extract(data, '$.id') AS id,
@@ -188,13 +215,13 @@ function createReadViews(db: DatabaseSync): void {
       json_extract(data, '$.about') AS about,
       json_extract(data, '$.at') AS at,
       json_extract(data, '$.event_id') AS event_id,
+      json_extract(data, '$.fired_run') AS fired_run,
       json_extract(data, '$.created_at') AS created_at,
       data
     FROM projections
     WHERE collection = 'timers';
 
-    DROP VIEW IF EXISTS v_schedules;
-    CREATE VIEW v_schedules AS
+    ${dropPrefix("v_schedules")}
     SELECT
       key AS proj_key,
       json_extract(data, '$.rule') AS rule,
@@ -207,8 +234,7 @@ function createReadViews(db: DatabaseSync): void {
     FROM projections
     WHERE collection = 'schedules';
 
-    DROP VIEW IF EXISTS v_pauses;
-    CREATE VIEW v_pauses AS
+    ${dropPrefix("v_pauses")}
     SELECT
       key AS proj_key,
       json_extract(data, '$.rule') AS rule,
@@ -219,8 +245,7 @@ function createReadViews(db: DatabaseSync): void {
     FROM projections
     WHERE collection = 'pauses';
 
-    DROP VIEW IF EXISTS v_skipped;
-    CREATE VIEW v_skipped AS
+    ${dropPrefix("v_skipped")}
     SELECT
       key AS proj_key,
       json_extract(data, '$.id') AS id,
@@ -332,6 +357,8 @@ function rebuildFromFacts(db: DatabaseSync, fingerprint: string): View {
     upsertMetaStmt.run(META_HIGH_WATER_MARKS, JSON.stringify(view.next));
     upsertMetaStmt.run(META_PROJECTION_COUNT, String(projCount));
 
+    ensureSqlViews(db, { replace: true });
+
     db.exec("COMMIT");
   } catch (err) {
     if (db.isTransaction) {
@@ -412,8 +439,13 @@ export function openStore(dbPath: string, options?: OpenStoreOptions): Store {
       ? hydrateViewFromProjections(db, maxSeq, meta.get(META_HIGH_WATER_MARKS))
       : rebuildFromFacts(db, fingerprint);
 
-    createReadViews(db);
+    if (canHydrate) {
+      ensureSqlViews(db, { replace: false });
+    }
 
+    const selectFactsAfterStmt = db.prepare(
+      "SELECT seq, at, type, data FROM facts WHERE seq > ? ORDER BY seq ASC",
+    );
     const insertFactStmt = db.prepare(
       "INSERT INTO facts (seq, at, type, data) VALUES (?, ?, ?, ?)",
     );
@@ -427,6 +459,31 @@ export function openStore(dbPath: string, options?: OpenStoreOptions): Store {
     const upsertMetaStmt = db.prepare(
       "INSERT INTO store_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     );
+
+    function applyChangesToProjections(changes: Fact["changes"]): void {
+      for (const change of changes) {
+        if (change.row === null) {
+          deleteProjStmt.run(change.table, change.key);
+        } else {
+          upsertProjStmt.run(
+            change.table,
+            change.key,
+            JSON.stringify(change.row),
+          );
+        }
+      }
+    }
+
+    function syncStoreMeta(
+      lastSeq: number,
+      hwm: Partial<Record<Table, number>>,
+    ): void {
+      const cntRow = countProjStmt.get() as { cnt: number };
+      upsertMetaStmt.run(META_FINGERPRINT, fingerprint);
+      upsertMetaStmt.run(META_LAST_SEQ, String(lastSeq));
+      upsertMetaStmt.run(META_HIGH_WATER_MARKS, JSON.stringify(hwm));
+      upsertMetaStmt.run(META_PROJECTION_COUNT, String(cntRow.cnt));
+    }
 
     return {
       get view(): View {
@@ -476,29 +533,11 @@ export function openStore(dbPath: string, options?: OpenStoreOptions): Store {
               fact.type,
               JSON.stringify({ version: fact.version, changes: fact.changes }),
             );
-            for (const change of fact.changes) {
-              if (change.row === null) {
-                deleteProjStmt.run(change.table, change.key);
-              } else {
-                upsertProjStmt.run(
-                  change.table,
-                  change.key,
-                  JSON.stringify(change.row),
-                );
-              }
-            }
+            applyChangesToProjections(fact.changes);
             lastSeq = fact.seq;
           }
 
-          const cntRow = countProjStmt.get() as { cnt: number };
-          upsertMetaStmt.run(META_FINGERPRINT, fingerprint);
-          upsertMetaStmt.run(META_LAST_SEQ, String(lastSeq));
-          upsertMetaStmt.run(
-            META_HIGH_WATER_MARKS,
-            JSON.stringify(projectedNext),
-          );
-          upsertMetaStmt.run(META_PROJECTION_COUNT, String(cntRow.cnt));
-
+          syncStoreMeta(lastSeq, projectedNext);
           db.exec("COMMIT");
         } catch (err) {
           if (db.isTransaction) {
@@ -510,6 +549,119 @@ export function openStore(dbPath: string, options?: OpenStoreOptions): Store {
         for (const fact of facts) {
           applyFact(view, fact);
         }
+      },
+
+      commitLatest(decideFn: (latestView: View) => Fact | null): Fact | null {
+        if (typeof decideFn !== "function") {
+          throw new InputError("decideFn must be a function");
+        }
+
+        let externalFacts: Fact[] = [];
+        let decidedFact: Fact | null = null;
+
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const extRows = selectFactsAfterStmt.all(view.seq) as Array<
+            Record<string, unknown>
+          >;
+          externalFacts = extRows.map(parseFactRow);
+
+          const baseView = externalFacts.length > 0 ? view.fork() : view;
+          for (const extFact of externalFacts) {
+            if (extFact.seq !== baseView.seq + 1) {
+              throw new ConflictError(
+                `External fact seq ${extFact.seq} must equal ${baseView.seq + 1}`,
+              );
+            }
+            applyChangesToProjections(extFact.changes);
+            applyFact(baseView, extFact);
+          }
+
+          let decideErr: unknown = null;
+          let hasDecideErr = false;
+          try {
+            decidedFact = decideFn(baseView.fork());
+          } catch (err) {
+            decideErr = err;
+            hasDecideErr = true;
+          }
+
+          if (hasDecideErr) {
+            if (externalFacts.length > 0) {
+              syncStoreMeta(baseView.seq, baseView.next);
+              db.exec("COMMIT");
+              for (const extFact of externalFacts) {
+                applyFact(view, extFact);
+              }
+            } else {
+              db.exec("ROLLBACK");
+            }
+            throw decideErr;
+          }
+
+          if (decidedFact !== null) {
+            if (
+              !Number.isSafeInteger(decidedFact.seq) ||
+              decidedFact.seq <= 0
+            ) {
+              throw new InputError(
+                `Invalid fact seq: ${String(decidedFact.seq)}`,
+              );
+            }
+            if (decidedFact.seq !== baseView.seq + 1) {
+              throw new ConflictError(
+                `Fact seq ${decidedFact.seq} must equal ${baseView.seq + 1}`,
+              );
+            }
+
+            const projectedNext: Partial<Record<Table, number>> = {
+              ...baseView.next,
+            };
+            for (const change of decidedFact.changes) {
+              if (
+                change.row !== null &&
+                typeof change.row.id === "number" &&
+                Number.isFinite(change.row.id)
+              ) {
+                const prev = projectedNext[change.table] ?? 0;
+                if (change.row.id > prev) {
+                  projectedNext[change.table] = change.row.id;
+                }
+              }
+            }
+
+            insertFactStmt.run(
+              decidedFact.seq,
+              decidedFact.at,
+              decidedFact.type,
+              JSON.stringify({
+                version: decidedFact.version,
+                changes: decidedFact.changes,
+              }),
+            );
+            applyChangesToProjections(decidedFact.changes);
+            syncStoreMeta(decidedFact.seq, projectedNext);
+            db.exec("COMMIT");
+          } else if (externalFacts.length > 0) {
+            syncStoreMeta(baseView.seq, baseView.next);
+            db.exec("COMMIT");
+          } else {
+            db.exec("ROLLBACK");
+          }
+        } catch (err) {
+          if (db.isTransaction) {
+            db.exec("ROLLBACK");
+          }
+          throw err;
+        }
+
+        for (const extFact of externalFacts) {
+          applyFact(view, extFact);
+        }
+        if (decidedFact !== null) {
+          applyFact(view, decidedFact);
+        }
+        return decidedFact;
       },
 
       readFacts(afterSeq = 0, limit?: number): Fact[] {

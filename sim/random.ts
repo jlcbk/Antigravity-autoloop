@@ -627,6 +627,7 @@ export function runSimulation(options: SimulationOptions): SimulationStats {
   const env: DecideEnv = {
     signToken: createTokenSigner(MASTER_KEY_HEX),
     safeTokenEquals,
+    retryBaseMs: 2_000,
   };
 
   const stats: SimulationStats = {

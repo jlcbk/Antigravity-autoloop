@@ -571,6 +571,36 @@ describe("kernel/query", () => {
     view.set("run_events", "7:2", { run_id: 7, event_id: 2 });
     view.set("run_events", "7:3", { run_id: 7, event_id: 3 });
 
+    // Card 9: previously completed ("done") ask card on same (rule, lane)
+    view.set("cards", 9, {
+      id: 9,
+      key: "ask-prior",
+      kind: "ask",
+      status: "done",
+      rule: "pr-review",
+      lane: "PR#42",
+      grp: "repo-main",
+      source: "github",
+      agent: "workerA",
+      session: "sess-prev",
+      run_id: 4,
+      title: "Prior approval",
+      text: "Approved in earlier round",
+      options: ["Allow", "Deny"],
+      recommend: 0,
+      about: "Prior gate",
+      fyi: false,
+      choice: 0,
+      chosen: "Allow",
+      answer_text: null,
+      resolved_reason: null,
+      answer_event: 999,
+      version: 2,
+      created_at: iso(500),
+      decided_at: iso(800),
+      closed_at: iso(900),
+    });
+
     // Card 10: answered ask card that woke run 7
     view.set("cards", 10, {
       id: 10,
@@ -726,7 +756,7 @@ describe("kernel/query", () => {
     );
     assert.deepEqual(
       job.context.decided.map((c) => c.card),
-      [10],
+      [9],
     );
 
     const why = whyOf(view, 7);

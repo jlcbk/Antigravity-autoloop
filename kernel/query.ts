@@ -147,16 +147,18 @@ export function canClaimRun(
     return false;
   }
 
-  // 4. Single active run per (rule, lane)
+  // 4. Single active run per (grp, lane) across rules sharing the same group
+  const grp = groupOf(rule);
   const runLane = typeof runRow.lane === "string" ? runRow.lane : "";
   if (
-    claimedRuns.some((r) => r.rule === rule.name && (r.lane ?? "") === runLane)
+    claimedRuns.some(
+      (r) => (r.grp || r.rule) === grp && (r.lane ?? "") === runLane,
+    )
   ) {
     return false;
   }
 
   // 5. Group concurrency limit (rules without `parallel` default to 1)
-  const grp = groupOf(rule);
   const groupLimit = rule.parallel ?? 1;
   const groupActive = claimedRuns.filter((r) => r.grp === grp).length;
   if (groupActive >= groupLimit) {
@@ -367,13 +369,40 @@ function linkedAnsweredCards(view: View, eventIds: Set<number>): Row[] {
   );
 }
 
-function linkedFiredTimers(view: View, eventIds: Set<number>): Row[] {
+function extractFiredTimerContexts(
+  view: View,
+  evRows: readonly Row[],
+  eventIds: Set<number>,
+): JobTimerContext[] {
   if (eventIds.size === 0) {
     return [];
   }
-  return rows(view, "timers").filter(
+  const activeMatches = rows(view, "timers").filter(
     (t) => typeof t.event_id === "number" && eventIds.has(t.event_id),
   );
+  const coveredEventIds = new Set<number>(
+    activeMatches.map((t) => t.event_id as number),
+  );
+  const out: JobTimerContext[] = activeMatches.map((t) => ({
+    key: String(t.key),
+    about: String(t.about),
+    at: String(t.at),
+  }));
+
+  for (const ev of evRows) {
+    const evId = ev.id as number;
+    if (coveredEventIds.has(evId)) {
+      continue;
+    }
+    if (ev.type === "timer.due" && typeof ev.timer_key === "string") {
+      out.push({
+        key: ev.timer_key,
+        about: String(ev.timer_about ?? ev.summary ?? ""),
+        at: String(ev.timer_at ?? ev.received_at ?? ""),
+      });
+    }
+  }
+  return out;
 }
 
 function pickRuleForJob(
@@ -439,12 +468,10 @@ export function jobOf(view: View, runId: number, token: string): Job {
     }),
   );
 
-  const timers: JobTimerContext[] = linkedFiredTimers(view, eventIdSet).map(
-    (t) => ({
-      key: String(t.key),
-      about: String(t.about),
-      at: String(t.at),
-    }),
+  const timers: JobTimerContext[] = extractFiredTimerContexts(
+    view,
+    evRows,
+    eventIdSet,
   );
 
   const lane = typeof runRow.lane === "string" ? runRow.lane : "";
@@ -474,17 +501,20 @@ export function jobOf(view: View, runId: number, token: string): Job {
     at: String(c.created_at),
   }));
 
+  const answeredCardIds = new Set<number>(answers.map((a) => a.card));
   const decided: JobDecidedCardContext[] = rows(view, "cards", {
-    status: "decided",
+    status: ["decided", "done"],
     rule: ruleSpec.name,
     lane,
-  }).map((c) => ({
-    card: c.id as number,
-    key: String(c.key),
-    title: String(c.title),
-    choice: String(c.chosen ?? c.answer_text ?? ""),
-    at: String(c.decided_at ?? c.created_at),
-  }));
+  })
+    .filter((c) => !answeredCardIds.has(c.id as number))
+    .map((c) => ({
+      card: c.id as number,
+      key: String(c.key),
+      title: String(c.title),
+      choice: String(c.chosen ?? c.answer_text ?? ""),
+      at: String(c.decided_at ?? c.created_at),
+    }));
 
   return {
     run: runId,
@@ -634,11 +664,7 @@ export function whyOf(view: View, runId: number): WhyReport {
     at: String(c.decided_at ?? c.created_at),
   }));
 
-  const timers = linkedFiredTimers(view, eventIdSet).map((t) => ({
-    key: String(t.key),
-    about: String(t.about),
-    at: String(t.at),
-  }));
+  const timers = extractFiredTimerContexts(view, evRows, eventIdSet);
 
   const lastResult = runRow.last_result as RunResult | null | undefined;
   const lastResponse = runRow.last_response as Row | null | undefined;

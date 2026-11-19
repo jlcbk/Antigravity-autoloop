@@ -31,14 +31,24 @@ describe("parseInboundEvent", () => {
     assert.equal(ev.subject, "#42");
     assert.equal(ev.hops, 9);
 
-    const fileLinkEv = parseInboundEvent({
+    const httpLinkEv = parseInboundEvent({
       id: "local:1",
       type: "file.changed",
       subject: "org/repo:feat_1.0@v2",
-      link: "file:///Users/demo/project/README.md",
+      link: "http://127.0.0.1:8080/README.md",
       hops: 0,
     });
-    assert.equal(fileLinkEv.link, "file:///Users/demo/project/README.md");
+    assert.equal(httpLinkEv.link, "http://127.0.0.1:8080/README.md");
+
+    assert.throws(
+      () =>
+        parseInboundEvent({
+          id: "local:file-rejected",
+          type: "file.changed",
+          link: "file:///Users/demo/project/README.md",
+        }),
+      ProtocolInputError,
+    );
   });
 
   it("normalizes empty string subject to omitted", () => {

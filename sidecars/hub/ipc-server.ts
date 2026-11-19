@@ -526,36 +526,44 @@ export class HubRuntime {
       throw new ConflictError("HubRuntime 已关闭");
     }
     const nowMs = this.#now();
-    const { facts, value } = decide<T>(
-      this.store.view,
-      input,
-      nowMs,
-      this.#decideEnv,
-    );
+    const prevSeq = this.store.view.seq;
+    let value!: T;
+    let newNotifyCandidates: CardView[] = [];
 
-    if (facts.length > 0) {
-      this.store.commit(facts);
-
-      const newOpenCards: CardView[] = [];
-      for (const fact of facts) {
+    const committedFact = this.store.commitLatest((latestView) => {
+      const res = decide<T>(latestView, input, nowMs, this.#decideEnv);
+      value = res.value;
+      newNotifyCandidates = [];
+      if (res.facts.length > 1) {
+        throw new ConflictError(
+          `单次 decide 最多返回 1 条 Fact，实际返回 ${res.facts.length} 条`,
+        );
+      }
+      const fact = res.facts[0] ?? null;
+      if (fact !== null) {
         for (const change of fact.changes) {
-          if (
-            change.table === "cards" &&
-            change.row !== null &&
-            change.row.status === "open"
-          ) {
-            newOpenCards.push(cardViewOf(change.row));
+          if (change.table === "cards" && change.row !== null) {
+            const isNewlyCreated =
+              latestView.get("cards", change.key) === undefined;
+            if (
+              isNewlyCreated &&
+              (change.row.status === "open" || change.row.fyi === true)
+            ) {
+              newNotifyCandidates.push(cardViewOf(change.row));
+            }
           }
         }
       }
-      if (newOpenCards.length > 0) {
-        const activeConfig = rulesOf(this.store.view)?.config;
-        void this.notifier
-          .notifyCards(newOpenCards, activeConfig)
-          .catch((e) => {
-            this.#onError?.(e);
-          });
-      }
+      return fact;
+    });
+
+    if (committedFact !== null && newNotifyCandidates.length > 0) {
+      const activeConfig = rulesOf(this.store.view)?.config;
+      void this.notifier
+        .notifyCards(newNotifyCandidates, activeConfig)
+        .catch((e) => {
+          this.#onError?.(e);
+        });
     }
 
     if (input.type === "configureRules") {
@@ -571,7 +579,11 @@ export class HubRuntime {
       }
     }
 
-    if (facts.length > 0 || input.type === "tick") {
+    if (
+      committedFact !== null ||
+      this.store.view.seq > prevSeq ||
+      input.type === "tick"
+    ) {
       this.rescheduleDueTimer();
     }
 

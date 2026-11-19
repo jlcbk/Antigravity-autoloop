@@ -71,23 +71,24 @@ export function buildOsascriptArgs(title: string, body: string): string[] {
 
 /**
  * Determines whether a card qualifies for a desktop notification under rule `tell` policy.
- * Only newly created `open` `ask` cards or non-`fyi` `open` `notice` cards notify when `tell !== "never"`.
+ * Notifies newly created `open` `ask`/`notice` cards when `tell !== "never"`, plus
+ * newly created `fyi: true` `notice` cards when `tell === "always"`.
  */
 export function shouldNotifyCard(
   card: CardView,
   config?: RulesConfig | null,
 ): boolean {
-  if (card.status !== "open") {
-    return false;
-  }
-  if (card.kind === "notice" && card.fyi === true) {
-    return false;
-  }
   if (card.kind !== "ask" && card.kind !== "notice") {
     return false;
   }
   const ruleSpec = config?.rules.find((r) => r.name === card.rule);
   if (ruleSpec?.tell === "never") {
+    return false;
+  }
+  if (card.kind === "notice" && card.fyi === true) {
+    return ruleSpec?.tell === "always";
+  }
+  if (card.status !== "open") {
     return false;
   }
   return true;
@@ -164,8 +165,10 @@ export function createNotifier(options: NotifierOptions = {}): Notifier {
       }
       notifiedCardIds.add(card.card);
 
-      const kindLabel = card.kind === "ask" ? "待批奏折" : "通知";
-      const title = `Autoloop ${kindLabel} · ${card.title}`;
+      const kindLabel =
+        card.kind === "ask" ? "待批奏折" : card.fyi ? "简报" : "通知";
+      const rulePrefix = card.rule ? `[${card.rule}] ` : "";
+      const title = `${rulePrefix}Autoloop ${kindLabel} · ${card.title}`;
       const body = card.text || card.about || card.rule;
       const res = await notify(title, body);
       if (res.sent) {

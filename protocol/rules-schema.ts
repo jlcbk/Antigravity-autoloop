@@ -15,6 +15,16 @@ import {
   assertPlainObject,
 } from "./validate.ts";
 
+export const DEFAULT_ASK_FIRST: readonly string[] = [
+  "rm -rf",
+  "git push --force",
+  "git reset --hard",
+  "删除数据库",
+  "对外发送消息",
+  "修改密钥或权限",
+  "产生实质费用",
+];
+
 const RULES_CONFIG_KEYS = new Set([
   "timezone",
   "askFirst",
@@ -390,7 +400,7 @@ export function parseRulesConfig(input: unknown): RulesConfig {
     }
   }
 
-  let askFirst: string[] = [];
+  let askFirst: string[];
   if (obj.askFirst !== undefined) {
     if (!Array.isArray(obj.askFirst)) {
       throw new ProtocolInputError("RulesConfig.askFirst 必须是字符串数组");
@@ -398,6 +408,8 @@ export function parseRulesConfig(input: unknown): RulesConfig {
     askFirst = obj.askFirst.map((item, idx) =>
       assertNonEmptyString(item, `RulesConfig.askFirst[${idx}]`),
     );
+  } else {
+    askFirst = [...DEFAULT_ASK_FIRST];
   }
 
   const rawSources = assertPlainObject(obj.sources, "RulesConfig.sources");
@@ -436,6 +448,10 @@ export function parseRulesConfig(input: unknown): RulesConfig {
   }
   const rules: RuleSpec[] = [];
   const seenRuleNames = new Set<string>();
+  const groupParallelByGrp = new Map<
+    string,
+    { parallel: number; ruleName: string }
+  >();
   for (let i = 0; i < obj.rules.length; i++) {
     const rule = parseRule(obj.rules[i], i, sources, agents);
     if (seenRuleNames.has(rule.name)) {
@@ -444,6 +460,21 @@ export function parseRulesConfig(input: unknown): RulesConfig {
       );
     }
     seenRuleNames.add(rule.name);
+    if (rule.parallel !== undefined) {
+      const grp = rule.group ?? rule.name;
+      const existingGroup = groupParallelByGrp.get(grp);
+      if (existingGroup && existingGroup.parallel !== rule.parallel) {
+        throw new ProtocolInputError(
+          `同一并发组 "${grp}" 的规则 "${existingGroup.ruleName}" (parallel=${existingGroup.parallel}) 与 "${rule.name}" (parallel=${rule.parallel}) 设置了不一致的 parallel 值`,
+        );
+      }
+      if (!existingGroup) {
+        groupParallelByGrp.set(grp, {
+          parallel: rule.parallel,
+          ruleName: rule.name,
+        });
+      }
+    }
     rules.push(rule);
   }
 

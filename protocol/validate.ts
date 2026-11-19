@@ -170,14 +170,8 @@ function validateSafeUrl(link: string, label: string): string {
       `${label} 仅允许纯 ASCII 且禁止空白与控制字符`,
     );
   }
-  if (
-    !link.startsWith("http://") &&
-    !link.startsWith("https://") &&
-    !link.startsWith("file://")
-  ) {
-    throw new ProtocolInputError(
-      `${label} 必须使用 http://、https:// 或 file:// 协议`,
-    );
+  if (!link.startsWith("http://") && !link.startsWith("https://")) {
+    throw new ProtocolInputError(`${label} 仅允许使用 http:// 或 https:// 协议`);
   }
   let parsed: URL;
   try {
@@ -188,10 +182,6 @@ function validateSafeUrl(link: string, label: string): string {
   if (parsed.protocol === "http:" || parsed.protocol === "https:") {
     if (parsed.hostname.length === 0) {
       throw new ProtocolInputError(`${label} 缺少合法的主机名`);
-    }
-  } else if (parsed.protocol === "file:") {
-    if (parsed.pathname.length === 0) {
-      throw new ProtocolInputError(`${label} 缺少合法的文件路径`);
     }
   } else {
     throw new ProtocolInputError(`${label} 协议不受支持`);

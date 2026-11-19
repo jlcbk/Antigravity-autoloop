@@ -56,12 +56,17 @@ import {
 
 export const MAX_HOPS = 8;
 export const MAX_ATTEMPTS = 10;
+export const DEFAULT_RETRY_BASE_MS = 60_000;
 const MAX_BACKOFF_MS = 30 * 60_000;
+const RETRY_STREAK_WARN_ATTEMPT = 3;
+const RETRY_STREAK_WARN_KEY = "sys:retry-streak-warn";
+const ERROR_SUMMARY_MAX_CODEPOINTS = 120;
 const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 
 export interface DecideEnv {
   signToken(runId: number, attempt: number, claimId: string): string;
   safeTokenEquals?(a: string, b: string): boolean;
+  retryBaseMs?: number;
 }
 
 export type KernelInput =
@@ -375,6 +380,39 @@ function addRunUsage(
     }
   }
   return merged;
+}
+
+function truncateCodePoints(text: string, maxCodePoints: number): string {
+  const cps = Array.from(text);
+  if (cps.length <= maxCodePoints) {
+    return text;
+  }
+  return `${cps.slice(0, Math.max(0, maxCodePoints - 1)).join("")}…`;
+}
+
+function summarizeErrorLastLine(
+  raw: string | undefined | null,
+  fallback: string,
+): string {
+  if (typeof raw === "string") {
+    const nonEmptyLines = raw
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (nonEmptyLines.length > 0) {
+      return truncateCodePoints(
+        nonEmptyLines[nonEmptyLines.length - 1]!,
+        ERROR_SUMMARY_MAX_CODEPOINTS,
+      );
+    }
+  }
+  return truncateCodePoints(fallback, ERROR_SUMMARY_MAX_CODEPOINTS);
+}
+
+function cleanupFiredTimersForRun(rec: DraftRecorder, runId: number): void {
+  for (const timer of rows(rec.draft, "timers", { fired_run: runId })) {
+    rec.set("timers", String(timer.id), null);
+  }
 }
 
 function findQueuedRun(
@@ -877,6 +915,7 @@ function handleConfigureRules(
             },
           ],
         });
+        cleanupFiredTimersForRun(rec, run.id as number);
         cancelledRuns.push(run.id as number);
         cancelledForRule += 1;
       }
@@ -1261,6 +1300,7 @@ function handleSubmitResult(
         },
       ],
     });
+    cleanupFiredTimersForRun(rec, runId);
     rec.syncDue(nowMs);
     return {
       facts: rec.flushFact(nowMs, "run.cancelled"),
@@ -1274,8 +1314,21 @@ function handleSubmitResult(
 
   // 2. Failed outcome (backoff retry if attempts < MAX_ATTEMPTS, else terminal failed + alert)
   if (result.outcome === "failed") {
+    const conciseError = summarizeErrorLastLine(
+      result.error ?? result.summary,
+      "未知错误",
+    );
     if (attempts < MAX_ATTEMPTS) {
-      const delayMs = Math.min(MAX_BACKOFF_MS, 1000 * 2 ** attempts);
+      const retryBaseMs =
+        typeof env.retryBaseMs === "number" &&
+        Number.isFinite(env.retryBaseMs) &&
+        env.retryBaseMs > 0
+          ? env.retryBaseMs
+          : DEFAULT_RETRY_BASE_MS;
+      const delayMs = Math.min(
+        MAX_BACKOFF_MS,
+        retryBaseMs * 2 ** (attempts - 1),
+      );
       const notBeforeIso = iso(nowMs + delayMs);
       const hadStarted = runRow.started_at != null;
       let retrySession = hadStarted ? finalSession : null;
@@ -1319,7 +1372,60 @@ function handleSubmitResult(
             event_id: link.event_id,
           });
         }
+        for (const firedTimer of rows(rec.draft, "timers", {
+          fired_run: other.id,
+        })) {
+          rec.set("timers", String(firedTimer.id), {
+            ...firedTimer,
+            fired_run: runId,
+          });
+        }
         rec.set("runs", String(other.id), null);
+      }
+
+      const retryCardsCreated: CardView[] = [];
+      if (attempts === RETRY_STREAK_WARN_ATTEMPT) {
+        const laneStr = String(runRow.lane ?? "");
+        const existingWarn = rows(rec.draft, "cards", {
+          kind: "notice",
+          status: "open",
+          rule: runRow.rule,
+          lane: laneStr,
+          key: RETRY_STREAK_WARN_KEY,
+        });
+        if (existingWarn.length === 0) {
+          const warnId = rec.nextId("cards");
+          const warnCardRow: Row = {
+            id: warnId,
+            key: RETRY_STREAK_WARN_KEY,
+            kind: "notice",
+            status: "open",
+            rule: String(runRow.rule),
+            lane: laneStr,
+            grp: String(runRow.grp),
+            source: ruleSource,
+            agent: String(runRow.agent),
+            model: runRow.model ?? null,
+            session: finalSession,
+            run_id: runId,
+            title: `连续失败预警：${String(runRow.rule)}${laneStr ? ` (${laneStr})` : ""}`,
+            text: `规则 ${String(runRow.rule)}${laneStr ? ` (${laneStr})` : ""} 已连续失败 ${attempts} 次（正在退避重试）：${conciseError}`,
+            options: [],
+            about: `attempts=${attempts}/${MAX_ATTEMPTS}`,
+            fyi: false,
+            choice: null,
+            chosen: null,
+            answer_text: null,
+            resolved_reason: null,
+            answer_event: null,
+            version: 1,
+            created_at: nowIso,
+            decided_at: null,
+            closed_at: null,
+          };
+          rec.set("cards", String(warnId), warnCardRow);
+          retryCardsCreated.push(cardViewOf(warnCardRow));
+        }
       }
 
       const response = {
@@ -1328,7 +1434,7 @@ function handleSubmitResult(
         attempt: attempts,
         requeued: true,
         notBefore: notBeforeIso,
-        cardsCreated: [],
+        cardsCreated: retryCardsCreated,
         cardsResolved: [],
         rejectedResolves: [],
         timersUpdated: [],
@@ -1390,7 +1496,7 @@ function handleSubmitResult(
       session: finalSession,
       run_id: runId,
       title: `轮次连续失败告警：${String(runRow.rule)} (#${runId})`,
-      text: `规则 ${String(runRow.rule)}${runRow.lane ? ` (${String(runRow.lane)})` : ""} 的轮次 #${runId} 已连续失败 ${attempts} 次（达到上限 ${MAX_ATTEMPTS}）：${result.error ?? result.summary ?? "未知错误"}`,
+      text: `规则 ${String(runRow.rule)}${runRow.lane ? ` (${String(runRow.lane)})` : ""} 的轮次 #${runId} 已连续失败 ${attempts} 次（达到上限 ${MAX_ATTEMPTS}）：${conciseError}`,
       options: [],
       about: `attempts=${attempts}/${MAX_ATTEMPTS}`,
       fyi: false,
@@ -1441,6 +1547,7 @@ function handleSubmitResult(
         },
       ],
     });
+    cleanupFiredTimersForRun(rec, runId);
 
     rec.syncDue(nowMs);
     return {
@@ -1639,6 +1746,72 @@ function handleSubmitResult(
     cardsResolved.push(resItem.card);
   }
 
+  // Auto-close any open retry-streak warning card on this (rule, lane) upon recovery
+  const openStreakWarnings = rows(rec.draft, "cards", {
+    kind: "notice",
+    status: "open",
+    rule: runRow.rule,
+    lane: String(runRow.lane ?? ""),
+    key: RETRY_STREAK_WARN_KEY,
+  });
+  for (const warnCard of openStreakWarnings) {
+    rec.set("cards", String(warnCard.id), {
+      ...warnCard,
+      status: "closed",
+      resolved_reason: "auto-closed on lane recovery",
+      closed_at: nowIso,
+      version: ((warnCard.version as number) ?? 1) + 1,
+    });
+    cardsResolved.push(warnCard.id as number);
+  }
+
+  // Auto-emit fyi summary card when `tell === "always"` and run completed `done` with no explicit ask/notice
+  if (
+    result.outcome === "done" &&
+    ruleSpec?.tell === "always" &&
+    (result.ask?.length ?? 0) === 0 &&
+    (result.notice?.length ?? 0) === 0 &&
+    cardsCreated.length === 0
+  ) {
+    const autoCardId = rec.nextId("cards");
+    const laneStr = String(runRow.lane ?? "");
+    const summaryText =
+      typeof result.summary === "string" && result.summary.trim().length > 0
+        ? result.summary.trim()
+        : `规则 ${ruleSpec.name} 第 #${runId} 轮执行完成。`;
+    const autoFyiRow: Row = {
+      id: autoCardId,
+      key: `auto-fyi:${runId}`,
+      kind: "notice",
+      status: "closed",
+      rule: String(runRow.rule),
+      lane: laneStr,
+      grp: String(runRow.grp),
+      source: ruleSource,
+      agent: String(runRow.agent),
+      model: runRow.model ?? null,
+      runner: runRow.runner ?? null,
+      session: finalSession,
+      run_id: runId,
+      title: `${ruleSpec.name}${laneStr ? ` (${laneStr})` : ""} 执行完成`,
+      text: summaryText,
+      options: [],
+      about: "tell=always",
+      fyi: true,
+      choice: null,
+      chosen: null,
+      answer_text: null,
+      resolved_reason: null,
+      answer_event: null,
+      version: 1,
+      created_at: nowIso,
+      decided_at: null,
+      closed_at: nowIso,
+    };
+    rec.set("cards", String(autoCardId), autoFyiRow);
+    cardsCreated.push(cardViewOf(autoFyiRow));
+  }
+
   // 3d. Receipt: later
   for (const laterItem of result.later ?? []) {
     const existingTimers = rows(rec.draft, "timers", {
@@ -1695,6 +1868,7 @@ function handleSubmitResult(
         about: laterItem.about,
         at: laterItem.at,
         event_id: null,
+        fired_run: null,
         created_at: nowIso,
       });
       timersUpdated.push({
@@ -1797,6 +1971,7 @@ function handleSubmitResult(
     ...completedRunRow,
     last_response: response,
   });
+  cleanupFiredTimersForRun(rec, runId);
 
   rec.syncDue(nowMs);
   return {
@@ -2002,6 +2177,7 @@ function handleStopRun(
       ],
     };
     rec.set("runs", String(runId), updatedRow);
+    cleanupFiredTimersForRun(rec, runId);
     rec.syncDue(nowMs);
     return {
       facts: rec.flushFact(nowMs, "run.stopped"),
@@ -2504,11 +2680,9 @@ function handleTick(
       routed: ruleSpec ? [ruleName] : [],
       paused: [],
       received_at: nowIso,
-    });
-
-    rec.set("timers", String(timerId), {
-      ...timer,
-      event_id: eventId,
+      timer_key: String(timer.key),
+      timer_at: String(timer.at),
+      timer_about: typeof timer.about === "string" ? timer.about : "",
     });
 
     let runId: number | null = null;
@@ -2532,6 +2706,13 @@ function handleTick(
         },
       );
       runId = res.runId;
+      rec.set("timers", String(timerId), {
+        ...timer,
+        event_id: eventId,
+        fired_run: runId,
+      });
+    } else {
+      rec.set("timers", String(timerId), null);
     }
 
     timersFired.push({

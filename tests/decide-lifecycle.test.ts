@@ -39,6 +39,7 @@ const MASTER_KEY = "fedcba9876543210".repeat(4);
 const TEST_ENV: DecideEnv = {
   signToken: createTokenSigner(MASTER_KEY),
   safeTokenEquals,
+  retryBaseMs: 2000,
 };
 
 const T0 = Date.parse("2026-11-10T10:00:00.000Z");

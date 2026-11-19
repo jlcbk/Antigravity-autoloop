@@ -44,6 +44,13 @@ export function promptFor(job: Job, contextFile: string): string {
       `- 指定 Skill：请遵循并加载 skill「${job.rule.skill}」的规范执行。`,
     );
   }
+  if (job.session) {
+    lines.push(
+      job.rule.skill
+        ? `- 续接会话提醒：当前为续接旧会话，请务必重新阅读最新 Skill「${job.rule.skill}」指令（SKILL.md），切勿仅凭历史上下文记忆省略最新规范。`
+        : "- 续接会话提醒：当前为续接旧会话，若任务涉及相关 Skill，请务必重新阅读最新 Skill 指令后再执行。",
+    );
+  }
 
   if (job.context.events.length > 0) {
     lines.push("");
@@ -114,8 +121,28 @@ export function promptFor(job: Job, contextFile: string): string {
   lines.push(
     "3. 仅包含实际需要的字段即可；切勿把回执写成 ```json，切勿将结束围栏 ``` 与 JSON 写在同一行，需要人工审批或定时等待时输出回执后立刻结束本轮。",
   );
+  lines.push("4. 回执高频防错红线（必须严格遵守）：");
+  lines.push("   - ① `events[].summary` 不超过 200 字；");
+  lines.push(
+    "   - ② `link` 仅限 `http://` 或 `https://` 网址，禁填本地路径；",
+  );
+  lines.push(
+    '   - ③ 取消 `waiting` 中的 `later` 时只写 `{"key":"...","cancel":true}`，严禁同时携带 `at` 或 `about`。',
+  );
 
   return lines.join("\n");
+}
+
+const LEADING_BLOCK_MD_RE = /^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/;
+const LEADING_INLINE_MD_RE = /^(?:\*\*|__|~~|\*|_|`(?!``))+/;
+const TRAILING_INLINE_MD_RE = /(?:\*\*|__|~~|\*|_|`)+$/;
+
+function cleanRestSummary(rest: string, hadLeadingInline: boolean): string {
+  const trimmed = rest.trim();
+  if (!hadLeadingInline || trimmed.length === 0) {
+    return trimmed;
+  }
+  return trimmed.replace(TRAILING_INLINE_MD_RE, "").trim();
 }
 
 function parseFirstLine(normalized: string): {
@@ -130,107 +157,213 @@ function parseFirstLine(normalized: string): {
     return { outcome: "failed", summary: "" };
   }
 
-  let match = /^没跑成(?:\s*[:：]\s*(.*)|\s+(.*)|$)/.exec(firstNonEmpty);
-  if (match) {
-    const rest = (match[1] ?? match[2] ?? "").trim();
-    return { outcome: "failed", summary: rest || firstNonEmpty };
+  if (firstNonEmpty.startsWith("```")) {
+    return { outcome: "done", summary: "" };
   }
 
-  match = /^FAILED(?:\s*[:：]\s*(.*)|$)/.exec(firstNonEmpty);
-  if (match) {
-    const rest = (match[1] ?? "").trim();
-    return { outcome: "failed", summary: rest || firstNonEmpty };
+  let candidate = firstNonEmpty;
+  while (LEADING_BLOCK_MD_RE.test(candidate)) {
+    candidate = candidate.replace(LEADING_BLOCK_MD_RE, "").trimStart();
+  }
+  const inlinePrefix = LEADING_INLINE_MD_RE.exec(candidate);
+  const hadLeadingInline = inlinePrefix !== null;
+  if (hadLeadingInline) {
+    candidate = candidate.slice(inlinePrefix[0].length).trimStart();
   }
 
-  match = /^failed\s*[:：]\s*(.*)$/i.exec(firstNonEmpty);
+  let match =
+    /^没跑成(?:\*\*|__|~~|\*|_|`(?!``))*(?:\s*[:：](?:\*\*|__|~~|\*|_|`(?!``))*\s*(.*)|\s+(.*)|$)/.exec(
+      candidate,
+    );
   if (match) {
-    const rest = (match[1] ?? "").trim();
-    return { outcome: "failed", summary: rest || firstNonEmpty };
+    const rest = cleanRestSummary(
+      match[1] ?? match[2] ?? "",
+      hadLeadingInline,
+    );
+    return { outcome: "failed", summary: rest || "没跑成" };
   }
 
-  match = /^没事可做(?:\s*[:：]\s*(.*)|\s+(.*)|$)/.exec(firstNonEmpty);
+  match =
+    /^FAILED(?:\*\*|__|~~|\*|_|`(?!``))*(?:\s*[:：](?:\*\*|__|~~|\*|_|`(?!``))*\s*(.*)|$)/.exec(
+      candidate,
+    );
   if (match) {
-    const rest = (match[1] ?? match[2] ?? "").trim();
-    return { outcome: "nothing", summary: rest || firstNonEmpty };
+    const rest = cleanRestSummary(match[1] ?? "", hadLeadingInline);
+    return { outcome: "failed", summary: rest || "FAILED" };
   }
 
-  match = /^NOTHING(?:\s*[:：]\s*(.*)|$)/.exec(firstNonEmpty);
+  match =
+    /^failed(?:\*\*|__|~~|\*|_|`(?!``))*\s*[:：](?:\*\*|__|~~|\*|_|`(?!``))*\s*(.*)$/i.exec(
+      candidate,
+    );
   if (match) {
-    const rest = (match[1] ?? "").trim();
-    return { outcome: "nothing", summary: rest || firstNonEmpty };
+    const rest = cleanRestSummary(match[1] ?? "", hadLeadingInline);
+    return { outcome: "failed", summary: rest || "FAILED" };
   }
 
-  match = /^nothing\s*[:：]\s*(.*)$/i.exec(firstNonEmpty);
+  match =
+    /^没事可做(?:\*\*|__|~~|\*|_|`(?!``))*(?:\s*[:：](?:\*\*|__|~~|\*|_|`(?!``))*\s*(.*)|\s+(.*)|$)/.exec(
+      candidate,
+    );
   if (match) {
-    const rest = (match[1] ?? "").trim();
-    return { outcome: "nothing", summary: rest || firstNonEmpty };
+    const rest = cleanRestSummary(
+      match[1] ?? match[2] ?? "",
+      hadLeadingInline,
+    );
+    return { outcome: "nothing", summary: rest || "没事可做" };
+  }
+
+  match =
+    /^NOTHING(?:\*\*|__|~~|\*|_|`(?!``))*(?:\s*[:：](?:\*\*|__|~~|\*|_|`(?!``))*\s*(.*)|$)/.exec(
+      candidate,
+    );
+  if (match) {
+    const rest = cleanRestSummary(match[1] ?? "", hadLeadingInline);
+    return { outcome: "nothing", summary: rest || "NOTHING" };
+  }
+
+  match =
+    /^nothing(?:\*\*|__|~~|\*|_|`(?!``))*\s*[:：](?:\*\*|__|~~|\*|_|`(?!``))*\s*(.*)$/i.exec(
+      candidate,
+    );
+  if (match) {
+    const rest = cleanRestSummary(match[1] ?? "", hadLeadingInline);
+    return { outcome: "nothing", summary: rest || "NOTHING" };
   }
 
   return {
     outcome: "done",
-    summary: firstNonEmpty.startsWith("```") ? "" : firstNonEmpty,
+    summary: firstNonEmpty,
   };
 }
 
+interface OpenFenceMeta {
+  ticks: number;
+  lang: string;
+  inlineError?: string;
+}
+
+function parseOpenFence(line: string): OpenFenceMeta | null {
+  const openMatch = /^\s*(`{3,})(.*)$/.exec(line);
+  if (!openMatch) {
+    return null;
+  }
+  const ticks = openMatch[1]!.length;
+  const rest = openMatch[2]!.trim();
+  const spaceIdx = rest.search(/\s/);
+  const lang = (spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)).toLowerCase();
+  const extra = spaceIdx === -1 ? "" : rest.slice(spaceIdx).trim();
+
+  let inlineError: string | undefined;
+  if (lang === "agent-autoloop" && extra.length > 0) {
+    inlineError =
+      "```agent-autoloop 开始围栏必须独占一行，不能在同一行附加其他内容。";
+  }
+  return { ticks, lang, inlineError };
+}
+
+function parseCloseFenceTicks(line: string): number | null {
+  const closeMatch = /^\s*(`{3,})\s*$/.exec(line);
+  return closeMatch ? closeMatch[1]!.length : null;
+}
+
+function closesEarlierTaggedFence(
+  lines: readonly string[],
+  bareIdx: number,
+  ticks: number,
+): boolean {
+  for (let k = bareIdx - 1; k >= 0; k--) {
+    const closeK = parseCloseFenceTicks(lines[k]!);
+    if (closeK !== null && closeK >= ticks) {
+      return false;
+    }
+    const openK = parseOpenFence(lines[k]!);
+    if (openK && openK.lang.length > 0 && openK.ticks <= ticks) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function findMatchingOpenFenceUpward(
+  lines: readonly string[],
+  closeIdx: number,
+  closeTicks: number,
+): { openIdx: number; meta: OpenFenceMeta } | null {
+  // First pass: exact backtick length match (prevents 4-tick outer fences from matching 3-tick inner examples)
+  for (let j = closeIdx - 1; j >= 0; j--) {
+    const meta = parseOpenFence(lines[j]!);
+    if (!meta || meta.ticks !== closeTicks) {
+      continue;
+    }
+    if (meta.lang.length === 0) {
+      if (closesEarlierTaggedFence(lines, j, closeTicks)) {
+        return null;
+      }
+      return { openIdx: j, meta };
+    }
+    return { openIdx: j, meta };
+  }
+
+  // Fallback pass: CommonMark longer closing fence (`closeTicks > openTicks`)
+  for (let j = closeIdx - 1; j >= 0; j--) {
+    const meta = parseOpenFence(lines[j]!);
+    if (!meta || meta.ticks > closeTicks) {
+      continue;
+    }
+    if (meta.lang.length === 0) {
+      if (closesEarlierTaggedFence(lines, j, meta.ticks)) {
+        return null;
+      }
+      return { openIdx: j, meta };
+    }
+    return { openIdx: j, meta };
+  }
+
+  return null;
+}
+
+/**
+ * Scan fenced code blocks in reverse (bottom-up) so unclosed code fences in prose
+ * never swallow a valid closed `agent-autoloop` or `json` receipt block at the end,
+ * while still detecting an unclosed trailing `agent-autoloop` fence.
+ */
 function scanFencedBlocks(normalized: string): FencedBlock[] {
   const lines = normalized.split("\n");
-  const blocks: FencedBlock[] = [];
+  const reversedBlocks: FencedBlock[] = [];
+  let unconsumedEnd = lines.length;
 
-  let open: {
-    ticks: number;
-    lang: string;
-    contentLines: string[];
-    inlineError?: string;
-  } | null = null;
-
-  for (const line of lines) {
-    if (open === null) {
-      const openMatch = /^\s*(`{3,})(.*)$/.exec(line);
-      if (openMatch) {
-        const ticks = openMatch[1].length;
-        const rest = openMatch[2].trim();
-        const spaceIdx = rest.search(/\s/);
-        const lang = (
-          spaceIdx === -1 ? rest : rest.slice(0, spaceIdx)
-        ).toLowerCase();
-        const extra = spaceIdx === -1 ? "" : rest.slice(spaceIdx).trim();
-
-        let inlineError: string | undefined;
-        if (lang === "agent-autoloop" && extra.length > 0) {
-          inlineError =
-            "```agent-autoloop 开始围栏必须独占一行，不能在同一行附加其他内容。";
-        }
-
-        open = { ticks, lang, contentLines: [], inlineError };
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const closeTicks = parseCloseFenceTicks(lines[i]!);
+    if (closeTicks !== null) {
+      const matched = findMatchingOpenFenceUpward(lines, i, closeTicks);
+      if (matched) {
+        reversedBlocks.push({
+          lang: matched.meta.lang,
+          content: lines.slice(matched.openIdx + 1, i).join("\n"),
+          closed: true,
+          inlineError: matched.meta.inlineError,
+        });
+        unconsumedEnd = matched.openIdx;
+        i = matched.openIdx;
       }
       continue;
     }
 
-    const closeMatch = /^\s*(`{3,})\s*$/.exec(line);
-    if (closeMatch && closeMatch[1].length >= open.ticks) {
-      blocks.push({
-        lang: open.lang,
-        content: open.contentLines.join("\n"),
-        closed: true,
-        inlineError: open.inlineError,
+    const openMeta = parseOpenFence(lines[i]!);
+    if (openMeta && openMeta.lang === "agent-autoloop") {
+      reversedBlocks.push({
+        lang: "agent-autoloop",
+        content: lines.slice(i + 1, unconsumedEnd).join("\n"),
+        closed: false,
+        inlineError: openMeta.inlineError,
       });
-      open = null;
-      continue;
+      unconsumedEnd = i;
     }
-
-    open.contentLines.push(line);
   }
 
-  if (open !== null) {
-    blocks.push({
-      lang: open.lang,
-      content: open.contentLines.join("\n"),
-      closed: false,
-      inlineError: open.inlineError,
-    });
-  }
-
-  return blocks;
+  reversedBlocks.reverse();
+  return reversedBlocks;
 }
 
 function findLastBlock(
