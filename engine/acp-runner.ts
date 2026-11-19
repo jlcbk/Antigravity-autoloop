@@ -66,6 +66,8 @@ const CONTROL_PLANE_DENY_REASON =
   "Operation touches protected Autoloop control-plane secrets, database, or configuration files.";
 const GLOBAL_CONFIG_DENY_REASON =
   "Modifying global ~/.gemini/config/config.json is forbidden.";
+const TERMINAL_DISABLED_REASON =
+  "Client terminal capability is disabled; execute commands via agent tool with session/request_permission";
 
 const NO_ACCESS_CONTROL_FILES = [
   "owner.token",
@@ -112,6 +114,27 @@ const SEARCH_DIR_TOOL_NAMES = new Set([
   "glob",
 ]);
 
+const SHELL_TOOL_NAMES = new Set([
+  "run_command",
+  "bash",
+  "sh",
+  "zsh",
+  "dash",
+  "ksh",
+  "ash",
+  "shell",
+  "terminal",
+  "execute_command",
+  "exec",
+]);
+
+const EXPLICIT_READ_FILE_TOOL_NAMES = new Set([
+  "read",
+  "read_file",
+  "view_file",
+  "fs/read_text_file",
+]);
+
 const FILE_ARG_KEYS = new Set([
   "targetfile",
   "absolutepath",
@@ -125,6 +148,15 @@ const FILE_ARG_KEYS = new Set([
   "searchdirectory",
   "directory",
   "dir",
+  "cwd",
+  "root",
+  "folder",
+  "location",
+  "target",
+  "external_directory",
+  "externaldirectory",
+  "parentdir",
+  "basedir",
   "paths",
   "files",
   "source",
@@ -267,6 +299,35 @@ const READONLY_GIT_SUBCOMMANDS = new Set([
   "name-rev",
   "verify-commit",
   "verify-tag",
+]);
+
+const EXTRA_READONLY_SHELL_COMMANDS = new Set([
+  "pwd",
+  "whoami",
+  "id",
+  "uname",
+  "date",
+  "which",
+  "type",
+  "printf",
+  "echo",
+  "true",
+  "false",
+  "seq",
+  "uniq",
+  "paste",
+  "join",
+  "rev",
+  "tac",
+  "du",
+  "df",
+  "ps",
+  "lsof",
+  "tree",
+  "fd",
+  "fdfind",
+  "ag",
+  "ack",
 ]);
 
 const MUTATING_COMMANDS = new Set([
@@ -724,6 +785,28 @@ function isReadOnlyTextControlPath(
   return false;
 }
 
+function isInsideProtectedControlDir(
+  normPath: string,
+  cpSpec: ControlPlaneSpec,
+): boolean {
+  if (!normPath) return false;
+  for (const home of cpSpec.searchRestrictedHomes) {
+    if (normPath === home || isStrictlyInside(normPath, home)) {
+      return true;
+    }
+  }
+  const guardDir = path.dirname(cpSpec.normGuardFile);
+  if (
+    guardDir &&
+    guardDir !== "/" &&
+    guardDir !== cpSpec.normCwd &&
+    (normPath === guardDir || isStrictlyInside(normPath, guardDir))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function isNoWriteControlPath(
   normPath: string,
   cpSpec: ControlPlaneSpec,
@@ -731,7 +814,8 @@ function isNoWriteControlPath(
   return (
     isNoAccessControlPath(normPath, cpSpec) ||
     isDbControlPath(normPath, cpSpec) ||
-    isReadOnlyTextControlPath(normPath, cpSpec)
+    isReadOnlyTextControlPath(normPath, cpSpec) ||
+    isInsideProtectedControlDir(normPath, cpSpec)
   );
 }
 
@@ -1217,6 +1301,7 @@ interface AnalyzedSegment {
   raw: string;
   tokens: string[];
   embedded: EmbeddedExecution | null;
+  depth: number;
 }
 
 function extractEmbeddedExecution(tokens: string[]): EmbeddedExecution | null {
@@ -1338,7 +1423,7 @@ function collectEffectiveSegments(
   for (const seg of rawSegments) {
     const tokens = unwrapCommandTokens(tokenizeSegment(seg));
     const embedded = extractEmbeddedExecution(tokens);
-    results.push({ raw: seg, tokens, embedded });
+    results.push({ raw: seg, tokens, embedded, depth });
     if (embedded && embedded.kind === "shell" && embedded.code) {
       results.push(...collectEffectiveSegments(embedded.code, depth + 1));
     }
@@ -1602,6 +1687,18 @@ function isSafeReadCommandOnTextTarget(entry: AnalyzedSegment): boolean {
   if (cmd === "git") {
     return isReadOnlyGitInvocation(parseGitSegment(toks));
   }
+  if (PYTHON_INTERPRETER_RE.test(cmd)) {
+    return toks[1] === "-m" && toks[2] === "json.tool" && toks.length <= 4;
+  }
+  if (cmd === "autoloop") {
+    const sub = String(toks[1] ?? "").toLowerCase();
+    return (
+      sub === "check" ||
+      sub === "explain" ||
+      sub === "status" ||
+      sub === "why"
+    );
+  }
   return false;
 }
 
@@ -1625,6 +1722,12 @@ function inspectCommandProtectedTargets(
   const entries = collectEffectiveSegments(commandLine);
 
   for (const entry of entries) {
+    if (
+      entry.embedded?.kind === "shell" &&
+      entry.depth >= MAX_SUBSHELL_DEPTH
+    ) {
+      return CONTROL_PLANE_DENY_REASON;
+    }
     const cmd = path.basename(entry.tokens[0] ?? "").toLowerCase();
     const redirects = extractRedirectTargets(entry.raw);
     const hasRedirect = redirects.length > 0;
@@ -1659,16 +1762,23 @@ function inspectCommandProtectedTargets(
       if (isNoAccessControlPath(normCandidate, cpSpec)) {
         return CONTROL_PLANE_DENY_REASON;
       }
-      if (isDbControlPath(normCandidate, cpSpec) && !isSafeDbMetaRead) {
-        return CONTROL_PLANE_DENY_REASON;
-      }
-      if (!isSafeTextRead) {
-        if (isProtectedGlobalConfigPath(normCandidate)) {
-          return GLOBAL_CONFIG_DENY_REASON;
-        }
-        if (isReadOnlyTextControlPath(normCandidate, cpSpec)) {
+      if (isDbControlPath(normCandidate, cpSpec)) {
+        if (!isSafeDbMetaRead) {
           return CONTROL_PLANE_DENY_REASON;
         }
+        continue;
+      }
+      if (isReadOnlyTextControlPath(normCandidate, cpSpec)) {
+        if (!isSafeTextRead) {
+          return CONTROL_PLANE_DENY_REASON;
+        }
+        continue;
+      }
+      if (isInsideProtectedControlDir(normCandidate, cpSpec)) {
+        return CONTROL_PLANE_DENY_REASON;
+      }
+      if (!isSafeTextRead && isProtectedGlobalConfigPath(normCandidate)) {
+        return GLOBAL_CONFIG_DENY_REASON;
       }
     }
 
@@ -1703,13 +1813,17 @@ function inspectCommandProtectedTargets(
         if (isDbControlPath(normLit, cpSpec)) {
           return CONTROL_PLANE_DENY_REASON;
         }
-        if (hasWriteIntent) {
-          if (isProtectedGlobalConfigPath(normLit)) {
-            return GLOBAL_CONFIG_DENY_REASON;
-          }
-          if (isReadOnlyTextControlPath(normLit, cpSpec)) {
+        if (isReadOnlyTextControlPath(normLit, cpSpec)) {
+          if (hasWriteIntent) {
             return CONTROL_PLANE_DENY_REASON;
           }
+          continue;
+        }
+        if (isInsideProtectedControlDir(normLit, cpSpec)) {
+          return CONTROL_PLANE_DENY_REASON;
+        }
+        if (hasWriteIntent && isProtectedGlobalConfigPath(normLit)) {
+          return GLOBAL_CONFIG_DENY_REASON;
         }
       }
     }
@@ -1853,6 +1967,12 @@ function commandMatchesPattern(
 function isWriteShellCommand(commandLine: string): boolean {
   const entries = collectEffectiveSegments(commandLine);
   for (const entry of entries) {
+    if (
+      entry.embedded?.kind === "shell" &&
+      entry.depth >= MAX_SUBSHELL_DEPTH
+    ) {
+      return true;
+    }
     if (extractRedirectTargets(entry.raw).length > 0) {
       return true;
     }
@@ -1897,6 +2017,48 @@ function isWriteShellCommand(commandLine: string): boolean {
     }
   }
   return false;
+}
+
+function isReadOnlyShellCommand(commandLine: string): boolean {
+  if (!commandLine || !commandLine.trim()) return false;
+  if (isWriteShellCommand(commandLine)) return false;
+  const entries = collectEffectiveSegments(commandLine);
+  if (entries.length === 0) return false;
+
+  for (const entry of entries) {
+    if (extractRedirectTargets(entry.raw).length > 0) return false;
+    if (entry.tokens.length === 0) return false;
+    if (entry.embedded) {
+      if (entry.embedded.kind === "interpreter") return false;
+      if (entry.embedded.kind === "shell") {
+        if (
+          entry.depth >= MAX_SUBSHELL_DEPTH ||
+          !entry.embedded.code.trim()
+        ) {
+          return false;
+        }
+        continue;
+      }
+    }
+    if (isSafeReadCommandOnTextTarget(entry)) continue;
+    const cmd = path.basename(entry.tokens[0]!).toLowerCase();
+    if (EXTRA_READONLY_SHELL_COMMANDS.has(cmd)) continue;
+    if (cmd === "find") {
+      const hasUnsafeFindFlag = entry.tokens.some(
+        (t) =>
+          t === "-delete" ||
+          t === "-exec" ||
+          t === "-execdir" ||
+          t === "-ok" ||
+          t === "-okdir" ||
+          t.startsWith("-fprint") ||
+          t === "-fls",
+      );
+      if (!hasUnsafeFindFlag) continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 function extractFilePathsFromObject(
@@ -2068,6 +2230,9 @@ function evaluatePermissionRequest(
     ...extractFilePathsFromObject(rawInputObj),
     ...extractFilePathsFromObject(toolCall),
     ...extractFilePathsFromObject(params),
+    ...extractFilePathsFromObject(asRecord(toolCall.metadata)),
+    ...extractFilePathsFromObject(asRecord(params.metadata)),
+    ...extractFilePathsFromObject(asRecord(toolCall._meta)),
     ...diffPaths,
   ];
 
@@ -2111,22 +2276,48 @@ function evaluatePermissionRequest(
     commands.push(rawInputStringCmd);
   }
 
-  const isExecuteTool =
+  const hasShellToolIdentity =
     toolKind === "execute" ||
-    toolName === "run_command" ||
-    toolName === "bash" ||
-    toolName === "shell" ||
-    toolName === "terminal" ||
+    (toolKind === "" &&
+      (SHELL_TOOL_NAMES.has(toolName) || toolName.startsWith("terminal/")));
+
+  const isExecuteTool =
+    hasShellToolIdentity ||
+    SHELL_TOOL_NAMES.has(toolName) ||
     toolName.startsWith("terminal/") ||
     commands.length > 0;
 
-  if (isExecuteTool && commands.length === 0 && title.length > 0) {
+  if (
+    hasShellToolIdentity &&
+    commands.length === 0 &&
+    title.length > 0 &&
+    (rawInputCandidate === undefined ||
+      (rawInputObj !== null && Object.keys(rawInputObj).length === 0))
+  ) {
     const unquotedTitle = title.replace(/^`+|`+$/g, "").trim();
     if (unquotedTitle) {
       commands.push(unquotedTitle);
     }
   }
 
+  if (candidatePaths.length === 0 && !isExecuteTool && title.length > 0) {
+    const barePathRe = /(?:~\/|\/)[A-Za-z0-9_./@+-]+/g;
+    let m: RegExpExecArray | null;
+    while ((m = barePathRe.exec(title)) !== null) {
+      if (m[0]) candidatePaths.push(m[0]);
+    }
+  }
+
+  const isExternalDirTool =
+    toolName === "external_directory" ||
+    toolName.endsWith(":external_directory") ||
+    /\bexternal[_ -]?directory\b/i.test(title);
+  const isModeSwitchTool =
+    toolKind === "switch_mode" ||
+    /(?:^|[_:/.-])(?:switch_mode|set_mode|plan_mode|exit_plan_mode)(?:$|[_:/.-])/i.test(
+      toolName,
+    ) ||
+    /\b(?:switch[_ -]?mode|exit[_ -]?plan[_ -]?mode)\b/i.test(title);
   const isDeleteTool = toolKind === "delete" || DELETE_TOOL_NAMES.has(toolName);
   const isMutatingFileTool =
     toolKind === "edit" ||
@@ -2149,10 +2340,31 @@ function evaluatePermissionRequest(
       return false;
     }
     if (isDbControlPath(normTarget, guard.cpSpec)) {
-      return false;
+      if (!(hasShellToolIdentity && commands.length > 0)) {
+        return false;
+      }
+      continue;
     }
-    if (isSearchTool && guard.cpSpec.searchRestrictedHomes.has(normTarget)) {
-      return false;
+    if (isInsideProtectedControlDir(normTarget, guard.cpSpec)) {
+      if (hasShellToolIdentity && commands.length > 0) {
+        if (!isReadOnlyTextControlPath(normTarget, guard.cpSpec)) {
+          return false;
+        }
+        continue;
+      }
+      const isStrictExactRead =
+        isReadOnlyTextControlPath(normTarget, guard.cpSpec) &&
+        (toolKind === "read" ||
+          (toolKind === "" && EXPLICIT_READ_FILE_TOOL_NAMES.has(toolName))) &&
+        !isMutatingFileTool &&
+        !isDeleteTool &&
+        !isSearchTool &&
+        !isExternalDirTool &&
+        !isModeSwitchTool &&
+        commands.length === 0;
+      if (!isStrictExactRead) {
+        return false;
+      }
     }
     if (isMutatingFileTool) {
       if (isProtectedGlobalConfigPath(normTarget)) {
@@ -2164,9 +2376,57 @@ function evaluatePermissionRequest(
     }
   }
 
-  // 2. Enforce read-only mode on mutating file tools
-  if (guard.access === "read" && isMutatingFileTool) {
-    return false;
+  // 2. Enforce strict read-only tool allowlist when guard.access === "read"
+  if (guard.access === "read") {
+    if (
+      toolKind === "switch_mode" ||
+      toolKind === "other" ||
+      toolKind === "edit" ||
+      toolKind === "delete" ||
+      toolKind === "move" ||
+      toolKind === "fetch"
+    ) {
+      return false;
+    }
+    if (
+      isMutatingFileTool ||
+      isDeleteTool ||
+      isExternalDirTool ||
+      isModeSwitchTool
+    ) {
+      return false;
+    }
+    if (hasShellToolIdentity) {
+      if (commands.length === 0) {
+        return false;
+      }
+      for (const cmdLine of commands) {
+        if (!isReadOnlyShellCommand(cmdLine)) {
+          return false;
+        }
+      }
+    } else {
+      if (
+        toolKind !== "read" &&
+        toolKind !== "search" &&
+        toolKind !== "think"
+      ) {
+        return false;
+      }
+      if (commands.length > 0) {
+        return false;
+      }
+      if (
+        /(?:^|[_:/.-])(?:write|edit|patch|multiedit|delete|remove|move|rename|create|replace|apply_patch|notebook_edit|switch_mode|set_mode|plan_mode|external_directory|bash|sh|zsh|dash|ksh|ash|shell|terminal|exec|execute|run_command)(?:$|[_:/.-])/i.test(
+          toolName,
+        ) ||
+        /^(?:write|edit|patch|delete|remove|move|rename|switch[_ -]?mode|external[_ -]?directory)\b/i.test(
+          title.trim(),
+        )
+      ) {
+        return false;
+      }
+    }
   }
 
   // 3. Enforce delete askFirst policy on file delete tools
@@ -2211,7 +2471,7 @@ function evaluatePermissionRequest(
         }
       }
 
-      if (guard.access === "read" && isWriteShellCommand(cmdLine)) {
+      if (guard.access === "read" && !isReadOnlyShellCommand(cmdLine)) {
         return false;
       }
 
@@ -2290,12 +2550,14 @@ function extractTextFromAcpContent(content: unknown): string {
 }
 
 function readUsageFields(source: Record<string, unknown>): RunUsage | null {
-  const input =
+  const explicitInput =
     finiteNumber(source.input) ??
     finiteNumber(source.inputTokens) ??
-    finiteNumber(source.input_tokens) ??
-    finiteNumber(source.promptTokens) ??
-    finiteNumber(source.prompt_tokens);
+    finiteNumber(source.input_tokens);
+  const promptTokens =
+    finiteNumber(source.promptTokens) ?? finiteNumber(source.prompt_tokens);
+  const rawInput = explicitInput ?? promptTokens;
+
   const output =
     finiteNumber(source.output) ??
     finiteNumber(source.outputTokens) ??
@@ -2303,13 +2565,61 @@ function readUsageFields(source: Record<string, unknown>): RunUsage | null {
     finiteNumber(source.completionTokens) ??
     finiteNumber(source.completion_tokens) ??
     finiteNumber(source.candidatesTokens);
-  const cached =
+
+  const genericCached =
     finiteNumber(source.cached) ??
     finiteNumber(source.cachedInputTokens) ??
     finiteNumber(source.cachedTokens) ??
-    finiteNumber(source.cached_tokens) ??
+    finiteNumber(source.cached_tokens);
+
+  const anthropicCacheRead =
     finiteNumber(source.cache_read_input_tokens) ??
     finiteNumber(source.cacheReadInputTokens);
+  const anthropicCacheCreation =
+    finiteNumber(source.cache_creation_input_tokens) ??
+    finiteNumber(source.cacheCreationInputTokens);
+  const hasAnthropicCache =
+    anthropicCacheRead !== undefined || anthropicCacheCreation !== undefined;
+  const anthropicCached =
+    (anthropicCacheRead ?? 0) + (anthropicCacheCreation ?? 0);
+
+  const cached =
+    genericCached !== undefined
+      ? hasAnthropicCache
+        ? Math.max(genericCached, anthropicCached)
+        : genericCached
+      : hasAnthropicCache
+        ? anthropicCached
+        : undefined;
+
+  const totalTokens =
+    finiteNumber(source.totalTokens) ?? finiteNumber(source.total_tokens);
+
+  let input = rawInput;
+  if (cached !== undefined && cached > 0) {
+    if (input === undefined) {
+      if (hasAnthropicCache) {
+        input = cached;
+      }
+    } else if (hasAnthropicCache && explicitInput !== undefined) {
+      const alreadyIncludesCached =
+        totalTokens !== undefined &&
+        totalTokens < input + (output ?? 0) + cached;
+      if (!alreadyIncludesCached) {
+        input = input + cached;
+      }
+    } else if (
+      totalTokens !== undefined &&
+      totalTokens >= input + (output ?? 0) + cached
+    ) {
+      input = input + cached;
+    }
+
+    if (input !== undefined && input < cached) {
+      input = cached;
+    }
+  }
+
   const cost =
     finiteNumber(source.cost) ??
     finiteNumber(source.costUsd) ??
@@ -2707,7 +3017,9 @@ export async function runAcpAgent(
     const normPath = normalizeComparablePath(rawPath, baseDir, envCtx);
     if (
       isNoAccessControlPath(normPath, guard.cpSpec) ||
-      isDbControlPath(normPath, guard.cpSpec)
+      isDbControlPath(normPath, guard.cpSpec) ||
+      (isInsideProtectedControlDir(normPath, guard.cpSpec) &&
+        !isReadOnlyTextControlPath(normPath, guard.cpSpec))
     ) {
       throw new AcpRpcError(-32000, CONTROL_PLANE_DENY_REASON);
     }
@@ -2830,21 +3142,12 @@ export async function runAcpAgent(
       }
 
       if (method.startsWith("terminal/")) {
-        const guard = loadGuardState(
-          guardFile,
-          contextFile,
-          job,
-          expandedCwd,
-          envCtx,
-        );
-        if (!guard || guard.access === "read") {
-          writeJsonRpc({
-            jsonrpc: "2.0",
-            id,
-            error: { code: -32000, message: READ_ONLY_DENY_REASON },
-          });
-          return;
-        }
+        writeJsonRpc({
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32000, message: TERMINAL_DISABLED_REASON },
+        });
+        return;
       }
 
       writeJsonRpc({
@@ -3065,6 +3368,13 @@ export async function runAcpAgent(
     if (incUsage.hasOutput) inc.output = incUsage.output;
     if (incUsage.hasCached) inc.cached = incUsage.cached;
     if (incUsage.hasCost) inc.cost = incUsage.cost;
+    if (
+      inc.cached !== undefined &&
+      inc.input !== undefined &&
+      inc.input < inc.cached
+    ) {
+      inc.input = inc.cached;
+    }
     const hasAnyInc =
       incUsage.hasInput ||
       incUsage.hasOutput ||
@@ -3085,6 +3395,13 @@ export async function runAcpAgent(
       if (merged.cost === undefined && inc.cost !== undefined) {
         merged.cost = inc.cost;
       }
+      if (
+        merged.cached !== undefined &&
+        merged.input !== undefined &&
+        merged.input < merged.cached
+      ) {
+        merged.input = merged.cached;
+      }
       return merged;
     }
     return hasAnyInc ? inc : undefined;
@@ -3099,7 +3416,7 @@ export async function runAcpAgent(
           readTextFile: true,
           writeTextFile: configuredAccess !== "read",
         },
-        terminal: configuredAccess !== "read",
+        terminal: false,
       },
       clientInfo: {
         name: "antigravity-autoloop",
