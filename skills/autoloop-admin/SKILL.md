@@ -31,7 +31,7 @@ description: >-
 | `autoloop_explain_rules` | 只读     | 对当前或草稿 `rules.json` 做 Schema 校验，解释事件路由去向、并发组与下次 Cron 触发时间。**修改规则前必须先用此工具校验。** |
 | `autoloop_answer`        | 本人管理 | 在聊天框代用户批复指定 `open` 提问卡（传入 `card` 与 `choice` 下标或自由文本 `text`），原子唤醒原会话续办。                |
 | `autoloop_resolve`       | 本人管理 | 将已过时或核实无需再处理的卡片标记结案（传入 `card` 与 `reason`）。                                                        |
-| `autoloop_emit`          | 事件投递 | 向中台注入标准本地事件（如触发 `idea.ingest`、`git.branch.ready` 或手动测试事件），按 `source + id` 幂等去重。             |
+| `autoloop_emit`          | 事件投递 | 向中台注入标准本地事件（如触发 `idea.ingest`、`git.branch.ready` 或手动测试事件），按 `source + id` 幂等去重；事件 `link` 仅允许 `http://` 或 `https://` URL。 |
 | `autoloop_pause`         | 本人管理 | 暂停指定规则（支持 `until` 定时自动恢复），暂停期间跳过事件仅记录不积压。                                                  |
 | `autoloop_resume`        | 本人管理 | 恢复已暂停的规则，并返回暂停期间跳过的事件列表供决定是否补跑。                                                             |
 | `autoloop_replay`        | 本人管理 | 按 `since` 对暂停期间跳过的事件执行补跑（每条仅补一次，避免雪崩）。                                                        |
@@ -59,7 +59,7 @@ description: >-
 ### 2.1 顶层冻结字段（严格白名单，禁止多余未知字段）
 
 - `timezone`（可选）：合法 IANA 时区字符串，如 `"Asia/Shanghai"`。
-- `askFirst`（必填字符串数组）：全局必须先上呈 `ask`「票拟」卡片获批的高危动作类别与命令模式，例如 `["rm -rf", "git push --force", "git reset --hard", "删除数据库", "对外发送消息", "修改密钥或权限", "产生实质费用"]`。
+- `askFirst`（**可选**字符串数组）：全局必须先上呈 `ask`「票拟」卡片获批的高危动作类别与命令模式。**省略该字段时**，系统自动填充 7 类默认高危红线：`["rm -rf", "git push --force", "git reset --hard", "删除数据库", "对外发送消息", "修改密钥或权限", "产生实质费用"]`；**显式传入空数组 `[]` 时**则为空（不启用默认列表）。
 - `sources`（对象）：声明事件源键名到显示名称的映射 `{ "<sourceKey>": { "name": "显示名称" } }`。**不同源的 `name` 不能重复**。
 - `agents`（对象）：定义可调度的执行角色池。
 - `rules`（数组）：定义事件或定时触发路由规则（`name` 不能重复）。
@@ -89,13 +89,14 @@ description: >-
 - `skill`（可选）：加载的 Skill 名称（如 `"recipe-morning-brief"`）。
 - `prompt`（可选）：可信本地补充指令。
 - `title`（可选）：会话标题模板，**必须以字母或数字开头且绝对不能包含空白字符**（匹配 `/^[a-zA-Z0-9]\S*$/`），仅支持 `{subject}` 与 `{id}` 占位符，例如 `"triage-{subject}"`。
-- `group` / `parallel` / `maxActive`（并发控制）：
+- `group` / `parallel` / `maxActive`（多级并发与互斥控制）：
   - `group` 默认等于规则 `name`；
-  - 设置 `parallel`（正整数）时，系统按事件 `subject` 自动切分独立事项（Lane），同 `group` 下同时运行的轮次不超过 `parallel`；同一事项新来事件自动排队合并；
+  - 设置 `parallel`（正整数，省略时有效值视为 `1`）时，系统按事件 `subject` 自动切分独立事项（Lane），同 `group` 下同时运行的轮次不超过 `parallel`，同一事项新来事件自动排队合并；
+  - **同组一致性与跨规则互斥约束**：共享同一 `group` 的所有规则，其有效 `parallel` 值（省略视为 `1`）**必须完全一致**，否则配置校验直接拒绝；且同一 `(group, lane)` 在任意时刻跨规则严格保持**单活跃互斥**（最多 1 个运行中轮次）；
   - `maxActive`（正整数）限制单条规则最大同时运行轮数。
 - `resume`（布尔值，默认 `false`）：同事项后续事件是否默认续接上一轮成功会话（注：`ask` 批红与 `later` 到期唤醒会自动续接原 `session`）。
-- `tell`（`"always" | "needed" | "never"`，默认 `"needed"`）：通知策略。
-- `emits`（可选）：`{ "source": "<sourceKey>", "types": ["git.branch.ready"] }`。仅白名单内衍生事件才被允许从回执发出，且每跳自动继承 `hops + 1`（`hops > 8` 强制熔断）。
+- `tell`（`"always" | "needed" | "never"`，默认 `"needed"`）：桌面通知与简报策略。设为 `"always"` 时，若轮次 `done` 且未显式产出 `ask`/`notice` 卡片，内核会自动生成一张 `fyi: true` 完成简报卡并推送带 `[<rule>]` 前缀的系统通知。
+- `emits`（可选）：`{ "source": "<sourceKey>", "types": ["git.branch.ready"] }`。仅白名单内衍生事件才被允许从回执发出，且每跳自动继承 `hops + 1`（`hops > 8` 强制熔断）；衍生事件及入站事件的 `link` 字段（若提供）**仅允许 `http://` 或 `https://` URL**（纯 ASCII、长度 `1..500`，严禁传入 `file://` 或本地路径）。
 
 ### 2.4 完整 `rules.json` 参考样例
 
@@ -210,19 +211,34 @@ description: >-
 
 ---
 
-## 4. 安全边界与日常排障操作流程
+## 4. 运行容错机制、安全边界与日常排障操作流程
 
-### 4.1 修改或新增规则的标准流程
+### 4.1 V1.1.0 核心运行容错与自保护机制
+
+排查状态或解释系统行为时，需知悉中台内置的五项确定性保护机制：
+
+1. **跨进程并发写库安全（`commitLatest`）**：当 CLI 处于本地 SQLite 回退模式与常驻 Sidecar 并发访问 `hub.db` 时，`commitLatest` 会在 `BEGIN IMMEDIATE` 事务锁内自动增量追平其他进程新写入的 `facts`，再执行状态转移，确保零冲突与异常零脏写。
+2. **`discardReceipt` 防副作用重跑与坏会话自愈**：
+   - 若首轮业务已完成（退出码 `0` 且结论为 `done`/`nothing`），但末尾回执经 2 次原会话 `repairPrompt` 仍格式损坏，Supervisor 会自动丢弃坏回执保留已完成业务状态（`done` 时生成「回执格式损坏已忽略」人工核查 `notice` 卡），绝不触发 10 次失败重做；
+   - 若续接失效历史 `conversationId` 未启动即非零退出（`!started`），自动降级为全新会话执行并补报新 `session`；`agy-print` 输出最终 `result` 帧后享有 `30s` 退出宽限回收。
+3. **`60s` 指数退避与第 3 次连续失败预警卡**：轮次失败默认按 `60s * 2^(attempt-1)` 指数退避重试（上限 30 分钟，最多 10 次）；连续第 **3** 次失败时自动生成 `key = "sys:retry-streak-warn"` 的末行精简错误预警卡，且在该事项后续成功恢复后自动结案。
+4. **`tell: "always"` 自动简报与 `[<rule>]` 通知前缀**：所有桌面系统通知标题均携带 `[<rule>]` 前缀便于识别来源规则；配置 `tell: "always"` 的规则在静默完成时也会自动落盘 `fyi: true` 简报卡并推送通知。
+5. **`PreToolUse` 三层控制面分级自保护**：
+   - **密级零访问**：`guard.json`、`owner.token`、`ingest.token`、`master.key`、`ipc.json` 严禁任何工具或命令读写；
+   - **数据库防篡改**：`hub.db`（含 `-wal`/`-shm`）严禁直接读写篡改（仅放行 `ls`/`stat`/`file` 查看元信息）；
+   - **上下文与规则只读放行**：`context.json` 与 `rules.json` 允许通过文件读取工具或安全只读命令（如 `cat`、`head`、`tail`、`sed -n`、`nl`、非原地 `awk`、`jq`、`python3 -m json.tool`、只读 `git`、`autoloop check|explain|status|why`）查看，但严厉拦截重定向写入、`sed -i` 及 `node -e` / `python -c` 内联写意图。
+
+### 4.2 修改或新增规则的标准流程
 
 1. 与用户确认触发时机、工作区 `cwd`、执行模型档位与 `askFirst` 边界。
-2. 构造草稿 JSON，先调用 `autoloop_explain_rules`（或运行 `autoloop check draft.json`）确认零报错且 Cron 下次触发时刻符合预期。
+2. 构造草稿 JSON，先调用 `autoloop_explain_rules`（或运行 `autoloop check draft.json`）确认零报错、同 `group` 的有效 `parallel` 一致且 Cron 下次触发时刻符合预期。
 3. 写入 `<AUTOLOOP_HOME>/rules.json` 后，再调用一次 `autoloop_status` 核实新流水线已热加载就绪。
 
-### 4.2 轮次异常或卡住时的排障步骤
+### 4.3 轮次异常或卡住时的排障步骤
 
-1. 调用 `autoloop_status` 定位异常的 `run` 编号或规则名。
-2. 调用 `autoloop_why` 查看该轮次的规则版本、输入事件 `context.json` 摘要、模型用量、错误原因及 `session`。
+1. 调用 `autoloop_status` 定位异常的 `run` 编号、规则名或 `sys:retry-streak-warn` 预警卡片。
+2. 调用 `autoloop_why` 查看该轮次的规则版本、输入事件摘要、模型用量、错误原因及 `session`。
 3. 常见处置：
    - **配置错误导致不断失败**：先 `autoloop_pause` 暂停该规则，修复问题后再 `autoloop_resume` 并按需 `autoloop_replay`。
    - **需要立即终止失控轮次**：调用 `autoloop_stop`，告知用户可在 `[Autoloop 工作台](sidecar://autoloop/hub/)` 查看最终 `cancelled` 状态。
-   - **回执格式报错**：确认 Agent 遵守「首行结论 + 末尾独占一行开始的 ` ```agent-autoloop ` 代码块 + 独占一行的结束 ` ``` `」，切勿标为 ` ```json `。
+   - **回执格式报错**：确认 Agent 遵守「首行结论 + 末尾独占一行开始的 ` ```agent-autoloop ` 代码块 + 独占一行的结束 ` ``` `」，`link` 仅填 `http://` 或 `https://` 网址，切勿将回执代码块标为 ` ```json `。
