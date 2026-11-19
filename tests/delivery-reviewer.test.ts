@@ -12,10 +12,10 @@
  * 3. Read-only stateless sandbox execution: invokes `agy --print --output-format stream-json`
  *    with `--mode plan --sandbox`, without `--conversation`, with control-plane tokens
  *    stripped, and without interpolating untrusted diff text into the prompt.
- * 4. Ledger SHA idempotency & 3-round escalation cap: identical `headSha` returns cached
+ * 4. Ledger SHA idempotency & default 2-round escalation cap: identical `headSha` returns cached
  *    outcomes with zero `agy` invocations; fixing findings transitions to `approved`;
- *    unresolved findings at round 3 or attempts beyond `maxReviewRounds` trigger
- *    `escalated_to_human`.
+ *    unresolved findings at round 2 (default `maxReviewRounds = 2`) or attempts beyond
+ *    `maxReviewRounds` trigger `escalated_to_human`.
  * 5. Fail-closed behavior: reviewer process crashes or invalid output throw and never
  *    poison the ledger cache or burn round budget.
  */
@@ -587,7 +587,7 @@ describe("reviewBranchSnapshot", () => {
     assert.equal(readJsonlRecords(recordFile).length, 2);
   });
 
-  it("escalates to human on round 3 unresolved findings and short-circuits round 4+ without spawning agy", async () => {
+  it("escalates to human on default round 2 unresolved findings and short-circuits round 3+ without spawning agy", async () => {
     const repoDir = createTempRepo({
       "src/worker.ts": "export const step = 0;\n",
     });
@@ -605,12 +605,7 @@ describe("reviewBranchSnapshot", () => {
       },
       {
         text: JSON.stringify({
-          findings: [{ title: "src/worker.ts:1 r2", text: "issue 2" }],
-        }),
-      },
-      {
-        text: JSON.stringify({
-          findings: [{ title: "src/worker.ts:1 r3", text: "still broken" }],
+          findings: [{ title: "src/worker.ts:1 r2", text: "still broken" }],
         }),
       },
       {
@@ -655,7 +650,7 @@ describe("reviewBranchSnapshot", () => {
     assert.equal(out1.status, "changes_requested");
     assert.equal(out1.cached, false);
 
-    // Round 2 -> changes_requested
+    // Round 2 (default maxReviewRounds = 2) with remaining findings -> escalated_to_human
     commitOnBranch(2);
     const snap2 = await extractBranchSnapshot({
       repoDir,
@@ -671,10 +666,12 @@ describe("reviewBranchSnapshot", () => {
       baseEnv,
     });
     assert.equal(out2.round, 2);
-    assert.equal(out2.status, "changes_requested");
+    assert.equal(out2.status, "escalated_to_human");
     assert.equal(out2.cached, false);
+    assert.equal(out2.findings[0]!.title, "src/worker.ts:1 r2");
+    assert.equal(readJsonlRecords(recordFile).length, 2);
 
-    // Round 3 with remaining findings -> escalated_to_human
+    // Round 3 new commit -> immediately escalated_to_human with ZERO agy invocations
     commitOnBranch(3);
     const snap3 = await extractBranchSnapshot({
       repoDir,
@@ -692,44 +689,23 @@ describe("reviewBranchSnapshot", () => {
     assert.equal(out3.round, 3);
     assert.equal(out3.status, "escalated_to_human");
     assert.equal(out3.cached, false);
-    assert.equal(out3.findings[0]!.title, "src/worker.ts:1 r3");
-    assert.equal(readJsonlRecords(recordFile).length, 3);
+    assert.equal(out3.findings[0]!.title, "src/worker.ts:1 r2");
+    assert.equal(readJsonlRecords(recordFile).length, 2);
 
-    // Round 4 new commit -> immediately escalated_to_human with ZERO agy invocations
-    commitOnBranch(4);
-    const snap4 = await extractBranchSnapshot({
-      repoDir,
-      targetRef: "feat/stubborn",
-      baseBranch: "main",
-      outputDir: path.join(workDir, "s4"),
-    });
-    const out4 = await reviewBranchSnapshot({
-      snapshot: snap4,
+    // Re-running round 3 returns cached: true
+    const out3Cached = await reviewBranchSnapshot({
+      snapshot: snap3,
       ledgerFile,
       authorModel: "claude-opus-5-5-high",
       agyBin: FAKE_AGY_BIN,
       baseEnv,
     });
-    assert.equal(out4.round, 4);
-    assert.equal(out4.status, "escalated_to_human");
-    assert.equal(out4.cached, false);
-    assert.equal(out4.findings[0]!.title, "src/worker.ts:1 r3");
-    assert.equal(readJsonlRecords(recordFile).length, 3);
-
-    // Re-running round 4 returns cached: true
-    const out4Cached = await reviewBranchSnapshot({
-      snapshot: snap4,
-      ledgerFile,
-      authorModel: "claude-opus-5-5-high",
-      agyBin: FAKE_AGY_BIN,
-      baseEnv,
-    });
-    assert.equal(out4Cached.cached, true);
-    assert.equal(out4Cached.status, "escalated_to_human");
-    assert.equal(readJsonlRecords(recordFile).length, 3);
+    assert.equal(out3Cached.cached, true);
+    assert.equal(out3Cached.status, "escalated_to_human");
+    assert.equal(readJsonlRecords(recordFile).length, 2);
 
     const ledger = readReviewLedger(ledgerFile);
-    assert.equal(ledger.entries.length, 4);
+    assert.equal(ledger.entries.length, 3);
   });
 
   it("fails closed without polluting ledger when agy crashes or emits invalid output", async () => {

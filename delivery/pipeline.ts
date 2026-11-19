@@ -32,7 +32,13 @@ import type {
   Receipt,
 } from "../protocol/types.ts";
 import { isPlainObject } from "../protocol/validate.ts";
-import { reviewBranchSnapshot, type ReviewOutcome } from "./reviewer.ts";
+import {
+  getEntryBlockingFindings,
+  hasCodeBlockingFindings,
+  readReviewLedger,
+  reviewBranchSnapshot,
+  type ReviewOutcome,
+} from "./reviewer.ts";
 import {
   atomicWritePrivateText,
   extractBranchSnapshot,
@@ -1131,10 +1137,15 @@ function buildFindingsDetail(review: ReviewOutcome): string {
   if (review.findings.length === 0) {
     return review.summary;
   }
-  const lines = review.findings.map(
-    (f, idx) =>
-      `${idx + 1}. [${f.severity ?? "blocking"}] ${f.title}: ${f.text}`,
-  );
+  const lines = review.findings.map((f, idx) => {
+    const loc =
+      f.file && !f.title.includes(f.file)
+        ? `${f.file}${f.line ? `:${f.line}` : ""} `
+        : "";
+    const howSuffix =
+      f.how && !f.text.includes(f.how) ? `（触发路径：${f.how}）` : "";
+    return `${idx + 1}. [${f.severity ?? "blocking"}] ${loc}${f.title}: ${f.text}${howSuffix}`;
+  });
   return truncateText(lines.join("\n"), 7_500);
 }
 
@@ -1196,11 +1207,37 @@ export async function runDeliveryPipeline(
 
   try {
     // ── Step 1: Bare snapshot extraction + heterogeneous read-only review ──
+    let previousReviewedSha: string | undefined;
+    let hasPriorCodeBlocking: boolean | undefined;
+    if (existsSync(ledgerFile)) {
+      try {
+        const priorLedger = readReviewLedger(ledgerFile);
+        for (let i = priorLedger.entries.length - 1; i >= 0; i--) {
+          const entry = priorLedger.entries[i]!;
+          if (
+            entry.targetRef === options.targetRef &&
+            (!options.baseBranch || entry.baseBranch === options.baseBranch)
+          ) {
+            const priorBlocking = getEntryBlockingFindings(entry);
+            if (priorBlocking.length > 0) {
+              previousReviewedSha = entry.headSha;
+              hasPriorCodeBlocking = hasCodeBlockingFindings(priorBlocking);
+            }
+            break;
+          }
+        }
+      } catch {
+        // Defer ledger validation error to reviewBranchSnapshot
+      }
+    }
+
     const snapshot = await extractBranchSnapshot({
       repoDir,
       targetRef: options.targetRef,
       baseBranch: options.baseBranch,
       outputDir,
+      previousReviewedSha,
+      hasPriorCodeBlocking,
     });
 
     if (options.signal?.aborted) {
@@ -2000,8 +2037,22 @@ export function createDeliveryRunner(
     }
 
     const repoDir = defaults.repoDir ?? ctx.job.rule.cwd;
-    const authorModel = defaults.authorModel ?? extractAuthorModelHint(events);
     const paths = resolveRunnerDeliveryPaths(ctx.contextFile, defaults);
+    let authorModel = defaults.authorModel ?? extractAuthorModelHint(events);
+    if (!authorModel && existsSync(paths.ledgerFile)) {
+      try {
+        const existingLedger = readReviewLedger(paths.ledgerFile);
+        for (let i = existingLedger.entries.length - 1; i >= 0; i--) {
+          const entry = existingLedger.entries[i]!;
+          if (entry.targetRef === targetRef && entry.authorModel) {
+            authorModel = entry.authorModel;
+            break;
+          }
+        }
+      } catch {
+        // Defer ledger validation error to runDeliveryPipeline
+      }
+    }
     const runTimeoutMs =
       ctx.job.agent.timeoutMinutes !== undefined
         ? ctx.job.agent.timeoutMinutes * 60_000
