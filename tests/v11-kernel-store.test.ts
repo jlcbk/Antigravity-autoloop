@@ -414,6 +414,110 @@ describe("P0: Protocol, receipt parsing, prompt anti-error hints & rules schema"
         }),
       ProtocolInputError,
     );
+
+    // Must-Fix 1 regression: mixing omitted `parallel` (implicit 1) with `parallel: 2` in the same group must throw
+    assert.throws(
+      () =>
+        parseRulesConfig({
+          askFirst: [],
+          sources: { github: { name: "GitHub" } },
+          agents: { worker: { name: "Worker", runner: "agy-print" } },
+          rules: [
+            {
+              name: "r1",
+              when: { source: "github", types: ["issue.*"] },
+              to: "worker",
+              cwd: "/tmp/repo",
+              group: "g1",
+            },
+            {
+              name: "r2",
+              when: { source: "github", types: ["pr.*"] },
+              to: "worker",
+              cwd: "/tmp/repo",
+              group: "g1",
+              parallel: 2,
+            },
+          ],
+        }),
+      ProtocolInputError,
+    );
+
+    // Reverse order (`parallel: 2` first, omitted `parallel` second) must also throw
+    assert.throws(
+      () =>
+        parseRulesConfig({
+          askFirst: [],
+          sources: { github: { name: "GitHub" } },
+          agents: { worker: { name: "Worker", runner: "agy-print" } },
+          rules: [
+            {
+              name: "r1",
+              when: { source: "github", types: ["issue.*"] },
+              to: "worker",
+              cwd: "/tmp/repo",
+              group: "g1",
+              parallel: 2,
+            },
+            {
+              name: "r2",
+              when: { source: "github", types: ["pr.*"] },
+              to: "worker",
+              cwd: "/tmp/repo",
+              group: "g1",
+            },
+          ],
+        }),
+      ProtocolInputError,
+    );
+
+    // Both omitted (implicit 1 === 1) or one omitted + one explicit `parallel: 1` (1 === 1) must pass
+    const bothOmitted = parseRulesConfig({
+      askFirst: [],
+      sources: { github: { name: "GitHub" } },
+      agents: { worker: { name: "Worker", runner: "agy-print" } },
+      rules: [
+        {
+          name: "r1",
+          when: { source: "github", types: ["issue.*"] },
+          to: "worker",
+          cwd: "/tmp/repo",
+          group: "g1",
+        },
+        {
+          name: "r2",
+          when: { source: "github", types: ["pr.*"] },
+          to: "worker",
+          cwd: "/tmp/repo",
+          group: "g1",
+        },
+      ],
+    });
+    assert.equal(bothOmitted.rules.length, 2);
+
+    const omittedAndExplicitOne = parseRulesConfig({
+      askFirst: [],
+      sources: { github: { name: "GitHub" } },
+      agents: { worker: { name: "Worker", runner: "agy-print" } },
+      rules: [
+        {
+          name: "r1",
+          when: { source: "github", types: ["issue.*"] },
+          to: "worker",
+          cwd: "/tmp/repo",
+          group: "g1",
+        },
+        {
+          name: "r2",
+          when: { source: "github", types: ["pr.*"] },
+          to: "worker",
+          cwd: "/tmp/repo",
+          group: "g1",
+          parallel: 1,
+        },
+      ],
+    });
+    assert.equal(omittedAndExplicitOne.rules[1]?.parallel, 1);
   });
 
   it("restricts InboundEvent.link strictly to http:// or https://", () => {

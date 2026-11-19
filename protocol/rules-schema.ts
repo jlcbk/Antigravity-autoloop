@@ -460,20 +460,19 @@ export function parseRulesConfig(input: unknown): RulesConfig {
       );
     }
     seenRuleNames.add(rule.name);
-    if (rule.parallel !== undefined) {
-      const grp = rule.group ?? rule.name;
-      const existingGroup = groupParallelByGrp.get(grp);
-      if (existingGroup && existingGroup.parallel !== rule.parallel) {
-        throw new ProtocolInputError(
-          `同一并发组 "${grp}" 的规则 "${existingGroup.ruleName}" (parallel=${existingGroup.parallel}) 与 "${rule.name}" (parallel=${rule.parallel}) 设置了不一致的 parallel 值`,
-        );
-      }
-      if (!existingGroup) {
-        groupParallelByGrp.set(grp, {
-          parallel: rule.parallel,
-          ruleName: rule.name,
-        });
-      }
+    const grp = rule.group ?? rule.name;
+    const effectiveParallel = rule.parallel ?? 1;
+    const existingGroup = groupParallelByGrp.get(grp);
+    if (existingGroup && existingGroup.parallel !== effectiveParallel) {
+      throw new ProtocolInputError(
+        `同一并发组 "${grp}" 的规则 "${existingGroup.ruleName}" (parallel=${existingGroup.parallel}) 与 "${rule.name}" (parallel=${effectiveParallel}) 的有效 parallel 值不一致`,
+      );
+    }
+    if (!existingGroup) {
+      groupParallelByGrp.set(grp, {
+        parallel: effectiveParallel,
+        ruleName: rule.name,
+      });
     }
     rules.push(rule);
   }
