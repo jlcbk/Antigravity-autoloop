@@ -4,6 +4,8 @@
 - 架构与冻结契约：[docs/03-system-architecture-and-protocol.md](docs/03-system-architecture-and-protocol.md)
 - 子代理工作包边界：[docs/05-subagent-wbs-and-hydrogen-guide.md](docs/05-subagent-wbs-and-hydrogen-guide.md)
 - 测试与验收门禁：[docs/06-testing-verification-and-acceptance.md](docs/06-testing-verification-and-acceptance.md)
+- AI 视频制片厂 SOP：[docs/07-ai-video-production-sop.md](docs/07-ai-video-production-sop.md)
+- 版本演进与变更日志：[CHANGELOG.md](CHANGELOG.md)
 
 ---
 
@@ -54,7 +56,7 @@
 - 事件的 `summary` 或 `detail` 原文被拼入提示词，或事件 payload 能够篡改执行目录 `cwd`、模型 `model`、权限档位 `access`。
 - 同一 `source + id` 事件被重复入账或重复派单；同一 `group` 并发超过 `parallel` 上限，或单规则/单模型超过 `maxActive` 上限。
 - 轮次失败重试时，未将该事项（`rule + lane`）排队期间新到达的事件合并进重试轮次；或者已连接上原会话（`started = true`）后中断却开启全新会话导致有副作用的操作重做一遍。
-- 回执 JSON 格式写错时，把已完成的业务重做了一遍（正确做法：在原会话仅发送 `repairPrompt` 重写最后一条回复，最多 2 次）。
+- 回执 JSON 格式写错时，把已完成的业务重做了一遍（正确做法：在原会话仅发送 `repairPrompt` 重写最后一条回复，最多 2 次；若首轮业务已完成 `done`/`nothing` 但 2 次修复后回执仍损坏或无可用会话，必须走 `discardReceipt` 安全降级保留首轮结论并推告警通知卡，严禁标为 `failed` 触发整轮副作用重跑）。
 - 同一张 `open` 提问卡片被回答两次，或回答与 `resolve` 同时生效；用户点击停止（`cancel`）后，已杀死的进程返回非零退出码又被当成 `failed` 自动重派。
-- `PreToolUse` 安全门禁漏放命中了未授权 `askFirst` 规则的危险命令，或辅助面板 UI 将不可信事件文本以 `innerHTML` 未转义直接渲染导致 XSS。
+- `PreToolUse` 安全门禁漏放命中了未授权 `askFirst` 规则的危险命令（含子 Shell / 内联脚本绕过或将中英文否定批复误判为已授权），或未保护控制面密钥/数据库/规则文件与 `guard.json` 本身（密级文件零访问、`hub.db*` 与 `rules.json` 严禁覆写、`guard.json` 损坏须 fail-closed 拒绝），或辅助面板 UI 将不可信事件文本以 `innerHTML` 未转义直接渲染导致 XSS。
 - Antigravity 插件配置违规：修改用户全局 `~/.gemini/config/config.json`、使用通配符权限（如 `command(*)`），或 MCP 服务名未加 `autoloop` 命名空间前缀。
