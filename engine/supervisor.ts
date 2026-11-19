@@ -381,6 +381,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           latestSession = initialSession;
         }
       } else if (
+        exec.preserveSession !== true &&
         nonEmptyString(job.session) !== null &&
         !entry.kernelCancelled &&
         !abortController.signal.aborted &&
@@ -450,15 +451,24 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         exec = repairedExec;
       }
 
-      if (anyStarted && !markedStarted) {
+      const preservedSession =
+        exec.preserveSession === true &&
+        !entry.kernelCancelled &&
+        exec.outcome !== "cancelled" &&
+        exec.cancelled !== true
+          ? (nonEmptyString(job.session) ?? nonEmptyString(exec.session))
+          : null;
+
+      if ((anyStarted || preservedSession !== null) && !markedStarted) {
+        const sessionToMark = preservedSession ?? latestSession;
         markedStarted = true;
-        lastMarkedSession = latestSession;
+        lastMarkedSession = sessionToMark;
         startPromise = startPromise
           .then(async () => {
             await options.backend.markStarted({
               run: job.run,
               token: job.token,
-              session: latestSession,
+              session: sessionToMark,
             });
           })
           .catch((err) => {
@@ -472,13 +482,16 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         return;
       }
 
-      const exposedSession: string | null | undefined = !anyStarted
-        ? undefined
-        : latestSession !== null
-          ? latestSession
-          : downgradedFromStaleSession
-            ? null
-            : undefined;
+      const exposedSession: string | null | undefined =
+        preservedSession !== null
+          ? preservedSession
+          : !anyStarted
+            ? undefined
+            : latestSession !== null
+              ? latestSession
+              : downgradedFromStaleSession
+                ? null
+                : undefined;
 
       let result: RunResult;
       if (

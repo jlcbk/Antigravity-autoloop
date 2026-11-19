@@ -11,6 +11,7 @@ export interface RunnerExecution {
   parsed: ParsedMessage;
   session: string | null;
   started: boolean;
+  preserveSession?: boolean;
   usage?: RunUsage;
   error?: string;
   exitCode: number | null;

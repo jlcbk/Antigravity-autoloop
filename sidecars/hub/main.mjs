@@ -329,14 +329,22 @@ export async function startHubHost(options = {}) {
     pollIntervalMs: options.pollIntervalMs,
     heartbeatIntervalMs: options.heartbeatIntervalMs,
     killGraceMs: options.killGraceMs,
+    postResultGraceMs: options.postResultGraceMs,
     agyBin: options.agyBin,
     agentApiBin: options.agentApiBin,
+    codexBin: options.codexBin,
+    claudeBin: options.claudeBin,
+    herdrBin: options.herdrBin,
     appDataDir: options.appDataDir,
     baseEnv: options.baseEnv,
     deliveryRunner:
       options.deliveryRunner ??
       createDeliveryRunner({
         agyBin: options.agyBin,
+        codexBin: options.codexBin,
+        claudeBin: options.claudeBin,
+        herdrBin: options.herdrBin,
+        postResultGraceMs: options.postResultGraceMs,
       }),
     notifier: options.notifier,
     notifierOptions: {
