@@ -9,12 +9,15 @@
  * 2. Session continuity (`session/load` with `{}` or `{ sessionId }`, isolating any replayed history chunks) vs
  *    graceful pre-prompt abort (`started: false, exitCode: 1, session: null`) when `session/load` returns an error
  *    so `supervisor.ts` can seamlessly downgrade stale sessions to `session: null`.
- * 3. Protocol-level `session/request_permission` hard security gate: fail-closed `guard.json`, `access: "read"`
- *    write/mutation denial, unauthorized `askFirst` & catastrophic command rejection (`reject_once` / `cancelled`),
- *    explicit `approvedKeys` allowance (`allow_once`), and unconditional protection of control-plane secrets/files
- *    (`guard.json`, `owner.token`, `ingest.token`, `master.key`, `ipc.json`, `hub.db*`, `rules.json`, `context.json`).
+ * 3. Protocol-level `session/request_permission` hard security gate: `clientCapabilities.terminal === false` &
+ *    unconditional `terminal/*` reverse-RPC rejection, fail-closed `guard.json`, strict `access: "read"` allowlist
+ *    (blocking `switch_mode`, `other` / MCP write tools, and mutating commands), unauthorized `askFirst` & catastrophic
+ *    command rejection (`reject_once` / `cancelled`), explicit `approvedKeys` allowance (`allow_once`), and
+ *    unconditional directory/subpath confinement of `<AUTOLOOP_HOME>` & `<guardDir>` (`external_directory`, `search`,
+ *    secret/DB files) while preserving exact read access to `context.json`, `rules.json`, and workspace `.autoloop/`.
  * 4. Reverse `fs/read_text_file` (with `line`/`limit`) and `fs/write_text_file` RPC callbacks enforcing `access`
- *    and blocking reads of secrets/DB and writes to read-only control-plane files.
+ *    and blocking reads/writes inside protected control-plane directories except exact read-only text files, plus
+ *    Anthropic-style cache token normalization (`cached <= input`).
  * 5. `AbortSignal` cancellation emitting `session/cancel` notification before process-group `SIGTERM` -> `SIGKILL`
  *    termination with zero surviving child or grandchild processes.
  */
@@ -23,6 +26,7 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -406,7 +410,7 @@ describe("v12 ACP Runner (`runAcpAgent`)", () => {
       protocolVersion: 1,
       clientCapabilities: {
         fs: { readTextFile: true, writeTextFile: true },
-        terminal: true,
+        terminal: false,
       },
       clientInfo: { name: "antigravity-autoloop", version: "1.2.0" },
     });
@@ -1298,6 +1302,588 @@ describe("v12 ACP Runner (`runAcpAgent`)", () => {
     });
     assert.deepEqual(bypassRes.outOfCwdRm, {
       outcome: { outcome: "selected", optionId: "reject_1" },
+    });
+  });
+
+  it("advertises clientCapabilities.terminal === false even for edit/full access and rejects all terminal/* reverse RPCs with -32000", async () => {
+    const dir = makeTempDir();
+    const autoloopHome = path.join(dir, "autoloop_home");
+    const reportFile = path.join(dir, "terminal-report.json");
+
+    const serverScript = makeFakeAcpServer(
+      dir,
+      `
+      let initCaps = null;
+      async function callSafe(method, params) {
+        try {
+          const res = await requestClient(method, params);
+          return { ok: true, res };
+        } catch (err) {
+          return { ok: false, err };
+        }
+      }
+
+      async function onMessage(msg) {
+        if (msg.method === "initialize") {
+          initCaps = msg.params.clientCapabilities;
+          send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+          return;
+        }
+        if (msg.method === "session/new") {
+          send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "sess-term-0" } });
+          return;
+        }
+        if (msg.method === "session/set_model") {
+          send({ jsonrpc: "2.0", id: msg.id, result: {} });
+          return;
+        }
+        if (msg.method === "session/prompt") {
+          const createRes = await callSafe("terminal/create", {
+            sessionId: "sess-term-0",
+            command: "echo",
+            args: ["hello"],
+          });
+          const outputRes = await callSafe("terminal/output", {
+            sessionId: "sess-term-0",
+            terminalId: "term-1",
+          });
+          writeFileSync(
+            ${JSON.stringify(reportFile)},
+            JSON.stringify({ initCaps, createRes, outputRes }),
+            "utf8",
+          );
+          send({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "sess-term-0",
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "终端能力禁用校验完成\\n" },
+              },
+            },
+          });
+          send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+          process.exit(0);
+        }
+      }
+      `,
+    );
+
+    for (const [idx, access] of (["edit", "full"] as const).entries()) {
+      const job = makeJob(dir, [process.execPath, serverScript], {
+        run: 600 + idx,
+        agent: {
+          id: `acp-${access}`,
+          name: `acp-${access}`,
+          runner: "acp",
+          command: [process.execPath, serverScript],
+          access,
+        },
+      });
+      const files = writeRunFiles(autoloopHome, job);
+      const exec = await runAcpAgent({
+        job,
+        contextFile: files.contextFile,
+        guardFile: files.guardFile,
+      });
+      assert.equal(exec.outcome, "done");
+
+      const report = JSON.parse(readFileSync(reportFile, "utf8"));
+      assert.deepEqual(report.initCaps, {
+        fs: { readTextFile: true, writeTextFile: true },
+        terminal: false,
+      });
+      assert.equal(report.createRes.ok, false);
+      assert.notEqual(report.createRes.err.code, -32601);
+      assert.equal(report.createRes.err.code, -32000);
+      assert.match(report.createRes.err.message, /terminal/i);
+      assert.equal(report.outputRes.ok, false);
+      assert.equal(report.outputRes.err.code, -32000);
+    }
+  });
+
+  it("blocks OpenCode external_directory and subpath searches on <AUTOLOOP_HOME> and <guardDir> while allowing exact context.json, rules.json, and workspace .autoloop/", async () => {
+    const dir = makeTempDir();
+    const autoloopHome = path.join(dir, "autoloop_home");
+    const wsAutoloopDir = path.join(dir, ".autoloop");
+    mkdirSync(wsAutoloopDir, { recursive: true });
+    const wsDecisionsFile = path.join(wsAutoloopDir, "decisions.md");
+    writeFileSync(wsDecisionsFile, "# Workspace decisions\n", "utf8");
+
+    const job = makeJob(dir, [process.execPath, "placeholder.mjs"], {
+      run: 610,
+    });
+    const files = writeRunFiles(autoloopHome, job);
+    const guardDir = path.dirname(files.guardFile);
+    const runsDir = path.dirname(guardDir);
+    const rulesJsonPath = path.join(autoloopHome, "rules.json");
+    const ownerTokenPath = path.join(autoloopHome, "owner.token");
+    const masterKeyPath = path.join(autoloopHome, "master.key");
+    const hubDbPath = path.join(autoloopHome, "hub.db");
+    const extraControlFile = path.join(autoloopHome, "internal-notes.txt");
+    writeFileSync(rulesJsonPath, '{"rules":[]}', "utf8");
+    writeFileSync(ownerTokenPath, "secret-owner", "utf8");
+    writeFileSync(masterKeyPath, "secret-master", "utf8");
+    writeFileSync(hubDbPath, "sqlite", "utf8");
+    writeFileSync(extraControlFile, "internal-control-state", "utf8");
+
+    const reportFile = path.join(dir, "cp-confinement-report.json");
+    const stdOptions = [
+      { optionId: "opt-allow-once", name: "Allow once", kind: "allow_once" },
+      { optionId: "opt-reject-once", name: "Reject once", kind: "reject_once" },
+    ];
+
+    const serverScript = makeFakeAcpServer(
+      dir,
+      `
+      const opts = ${JSON.stringify(stdOptions)};
+      async function callSafe(method, params) {
+        try {
+          const res = await requestClient(method, params);
+          return { ok: true, res };
+        } catch (err) {
+          return { ok: false, err };
+        }
+      }
+
+      async function onMessage(msg) {
+        if (msg.method === "initialize") {
+          send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+          return;
+        }
+        if (msg.method === "session/new") {
+          send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "sess-cp" } });
+          return;
+        }
+        if (msg.method === "session/set_model") {
+          send({ jsonrpc: "2.0", id: msg.id, result: {} });
+          return;
+        }
+        if (msg.method === "session/prompt") {
+          const r = {};
+          // OpenCode external_directory (kind: "other", locations: [autoloopHome], no name/rawInput)
+          r.extDirHome = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-1",
+              kind: "other",
+              title: "External directory access",
+              locations: [{ path: ${JSON.stringify(autoloopHome)} }],
+            },
+            options: opts,
+          });
+          r.extDirGuardRun = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-2",
+              kind: "other",
+              locations: [{ path: ${JSON.stringify(guardDir)} }],
+            },
+            options: [{ optionId: "allow-only", kind: "allow_once" }],
+          });
+          r.readHomeDir = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-3",
+              kind: "read",
+              locations: [{ path: ${JSON.stringify(autoloopHome)} }],
+            },
+            options: opts,
+          });
+          r.searchRunsDir = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-4",
+              kind: "search",
+              locations: [{ path: ${JSON.stringify(runsDir)} }],
+            },
+            options: opts,
+          });
+          r.searchGuardDir = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-5",
+              kind: "search",
+              locations: [{ path: ${JSON.stringify(guardDir)} }],
+            },
+            options: opts,
+          });
+          r.readOwnerToken = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-6",
+              kind: "read",
+              locations: [{ path: ${JSON.stringify(ownerTokenPath)} }],
+            },
+            options: opts,
+          });
+          r.readMasterKey = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-7",
+              kind: "read",
+              locations: [{ path: ${JSON.stringify(masterKeyPath)} }],
+            },
+            options: opts,
+          });
+          r.readHubDb = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-8",
+              kind: "read",
+              locations: [{ path: ${JSON.stringify(hubDbPath)} }],
+            },
+            options: opts,
+          });
+          r.otherOnContext = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-9",
+              kind: "other",
+              locations: [{ path: ${JSON.stringify(files.contextFile)} }],
+            },
+            options: opts,
+          });
+          r.readExactContext = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-10",
+              kind: "read",
+              locations: [{ path: ${JSON.stringify(files.contextFile)} }],
+            },
+            options: opts,
+          });
+          r.readExactRules = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-11",
+              kind: "read",
+              locations: [{ path: ${JSON.stringify(rulesJsonPath)} }],
+            },
+            options: opts,
+          });
+          r.wsAutoloopSearch = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-12",
+              kind: "search",
+              locations: [{ path: ${JSON.stringify(wsAutoloopDir)} }],
+            },
+            options: opts,
+          });
+          r.wsDecisionsEdit = await requestClient("session/request_permission", {
+            sessionId: "sess-cp",
+            toolCall: {
+              toolCallId: "cp-13",
+              kind: "edit",
+              locations: [{ path: ${JSON.stringify(wsDecisionsFile)} }],
+            },
+            options: opts,
+          });
+          r.fsReadRules = await callSafe("fs/read_text_file", {
+            sessionId: "sess-cp",
+            path: ${JSON.stringify(rulesJsonPath)},
+          });
+          r.fsReadExtraControl = await callSafe("fs/read_text_file", {
+            sessionId: "sess-cp",
+            path: ${JSON.stringify(extraControlFile)},
+          });
+          r.fsWriteExtraControl = await callSafe("fs/write_text_file", {
+            sessionId: "sess-cp",
+            path: ${JSON.stringify(path.join(autoloopHome, "injected.txt"))},
+            content: "nope",
+          });
+
+          writeFileSync(${JSON.stringify(reportFile)}, JSON.stringify(r), "utf8");
+          send({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "sess-cp",
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "控制面目录隔离校验完成\\n" },
+              },
+            },
+          });
+          send({ jsonrpc: "2.0", id: msg.id, result: { stopReason: "end_turn" } });
+          process.exit(0);
+        }
+      }
+      `,
+    );
+
+    job.agent.command = [process.execPath, serverScript];
+    const exec = await runAcpAgent({
+      job,
+      contextFile: files.contextFile,
+      guardFile: files.guardFile,
+    });
+    assert.equal(exec.outcome, "done");
+
+    const r = JSON.parse(readFileSync(reportFile, "utf8"));
+    const rejected = {
+      outcome: { outcome: "selected", optionId: "opt-reject-once" },
+    };
+    const allowed = {
+      outcome: { outcome: "selected", optionId: "opt-allow-once" },
+    };
+
+    assert.deepEqual(r.extDirHome, rejected);
+    assert.deepEqual(r.extDirGuardRun, { outcome: { outcome: "cancelled" } });
+    assert.deepEqual(r.readHomeDir, rejected);
+    assert.deepEqual(r.searchRunsDir, rejected);
+    assert.deepEqual(r.searchGuardDir, rejected);
+    assert.deepEqual(r.readOwnerToken, rejected);
+    assert.deepEqual(r.readMasterKey, rejected);
+    assert.deepEqual(r.readHubDb, rejected);
+    assert.deepEqual(r.otherOnContext, rejected);
+
+    assert.deepEqual(r.readExactContext, allowed);
+    assert.deepEqual(r.readExactRules, allowed);
+    assert.deepEqual(r.wsAutoloopSearch, allowed);
+    assert.deepEqual(r.wsDecisionsEdit, allowed);
+
+    assert.equal(r.fsReadRules.ok, true);
+    assert.equal(r.fsReadRules.res.content, '{"rules":[]}');
+    assert.equal(r.fsReadExtraControl.ok, false);
+    assert.equal(r.fsWriteExtraControl.ok, false);
+  });
+
+  it("enforces strict read-only tool allowlist under access=read (rejecting switch_mode, other/MCP tools, and unknown kinds) and normalizes Anthropic cached <= input usage", async () => {
+    const dir = makeTempDir();
+    const autoloopHome = path.join(dir, "autoloop_home");
+    const reportFile = path.join(dir, "ro-allowlist-report.json");
+    const stdOptions = [
+      { optionId: "opt-allow-once", name: "Allow once", kind: "allow_once" },
+      { optionId: "opt-reject-once", name: "Reject once", kind: "reject_once" },
+    ];
+
+    const serverScript = makeFakeAcpServer(
+      dir,
+      `
+      const opts = ${JSON.stringify(stdOptions)};
+      const usageVariant = process.env.TEST_USAGE_VARIANT || "uncached-separate";
+
+      async function onMessage(msg) {
+        if (msg.method === "initialize") {
+          send({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: 1 } });
+          return;
+        }
+        if (msg.method === "session/new") {
+          send({ jsonrpc: "2.0", id: msg.id, result: { sessionId: "sess-ro-strict" } });
+          return;
+        }
+        if (msg.method === "session/set_model") {
+          send({ jsonrpc: "2.0", id: msg.id, result: {} });
+          return;
+        }
+        if (msg.method === "session/prompt") {
+          const r = {};
+          r.switchMode = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-1",
+              kind: "switch_mode",
+              title: "Exit plan mode to build mode",
+            },
+            options: opts,
+          });
+          r.mcpGithubWrite = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-2",
+              kind: "other",
+              name: "mcp__github__create_issue",
+              title: "Create GitHub Issue",
+              rawInput: { title: "unauthorized issue" },
+            },
+            options: opts,
+          });
+          r.fetchTool = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-3",
+              kind: "fetch",
+              title: "POST webhook",
+            },
+            options: opts,
+          });
+          r.missingKind = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-4",
+              title: "Mystery custom tool",
+            },
+            options: opts,
+          });
+          r.spoofedReadWriteName = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-5",
+              kind: "read",
+              name: "write_file",
+              locations: [{ path: "README.md" }],
+            },
+            options: opts,
+          });
+          r.execArbitraryNodeScript = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-6",
+              kind: "execute",
+              rawInput: { command: "node mutate.js" },
+            },
+            options: opts,
+          });
+          r.execReadOnlyGit = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-7",
+              kind: "execute",
+              rawInput: { command: "git status --short" },
+            },
+            options: opts,
+          });
+          r.readWorkspace = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-8",
+              kind: "read",
+              title: "Read src/write-helper.ts",
+              locations: [{ path: "src/write-helper.ts" }],
+            },
+            options: opts,
+          });
+          r.searchWorkspace = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-9",
+              kind: "search",
+              title: "Grep workspace",
+              locations: [{ path: "src" }],
+            },
+            options: opts,
+          });
+          r.thinkTool = await requestClient("session/request_permission", {
+            sessionId: "sess-ro-strict",
+            toolCall: {
+              toolCallId: "ro-10",
+              kind: "think",
+              title: "Analyze findings",
+            },
+            options: opts,
+          });
+
+          writeFileSync(${JSON.stringify(reportFile)}, JSON.stringify(r), "utf8");
+          send({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+              sessionId: "sess-ro-strict",
+              update: {
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "只读白名单与用量归一化校验完成\\n" },
+              },
+            },
+          });
+
+          const usage =
+            usageVariant === "pre-summed"
+              ? {
+                  input_tokens: 550,
+                  cache_read_input_tokens: 400,
+                  cache_creation_input_tokens: 100,
+                  output_tokens: 80,
+                  total_tokens: 630,
+                }
+              : {
+                  input_tokens: 50,
+                  cache_read_input_tokens: 400,
+                  cache_creation_input_tokens: 100,
+                  output_tokens: 80,
+                };
+
+          send({
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: { stopReason: "end_turn", usage },
+          });
+          process.exit(0);
+        }
+      }
+      `,
+    );
+
+    const job = makeJob(dir, [process.execPath, serverScript], {
+      run: 620,
+      agent: {
+        id: "claude-acp-ro",
+        name: "claude-acp-ro",
+        runner: "acp",
+        command: [process.execPath, serverScript],
+        access: "read",
+      },
+    });
+    const files = writeRunFiles(autoloopHome, job);
+
+    const exec = await runAcpAgent({
+      job,
+      contextFile: files.contextFile,
+      guardFile: files.guardFile,
+    });
+    assert.equal(exec.outcome, "done");
+
+    const r = JSON.parse(readFileSync(reportFile, "utf8"));
+    const rejected = {
+      outcome: { outcome: "selected", optionId: "opt-reject-once" },
+    };
+    const allowed = {
+      outcome: { outcome: "selected", optionId: "opt-allow-once" },
+    };
+
+    assert.deepEqual(r.switchMode, rejected);
+    assert.deepEqual(r.mcpGithubWrite, rejected);
+    assert.deepEqual(r.fetchTool, rejected);
+    assert.deepEqual(r.missingKind, rejected);
+    assert.deepEqual(r.spoofedReadWriteName, rejected);
+    assert.deepEqual(r.execArbitraryNodeScript, rejected);
+
+    assert.deepEqual(r.execReadOnlyGit, allowed);
+    assert.deepEqual(r.readWorkspace, allowed);
+    assert.deepEqual(r.searchWorkspace, allowed);
+    assert.deepEqual(r.thinkTool, allowed);
+
+    assert.deepEqual(exec.usage, {
+      input: 550,
+      output: 80,
+      cached: 500,
+    });
+    assert.ok((exec.usage?.input ?? 0) >= (exec.usage?.cached ?? 0));
+
+    // Also verify pre-summed total_tokens payload does not double-count cached tokens
+    const job2 = makeJob(dir, [process.execPath, serverScript], {
+      run: 621,
+      agent: {
+        id: "claude-acp-ro",
+        name: "claude-acp-ro",
+        runner: "acp",
+        command: [process.execPath, serverScript],
+        access: "read",
+      },
+    });
+    const files2 = writeRunFiles(autoloopHome, job2);
+    const exec2 = await runAcpAgent({
+      job: job2,
+      contextFile: files2.contextFile,
+      guardFile: files2.guardFile,
+      baseEnv: { ...process.env, TEST_USAGE_VARIANT: "pre-summed" },
+    });
+    assert.deepEqual(exec2.usage, {
+      input: 550,
+      output: 80,
+      cached: 500,
     });
   });
 });
