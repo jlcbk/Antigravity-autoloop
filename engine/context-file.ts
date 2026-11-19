@@ -41,8 +41,17 @@ export interface TidyRunsResult {
 
 const DEFAULT_MAX_AGE_MS = 14 * 86_400_000;
 
-const REJECTION_CHOICE_RE =
-  /^(?:(?:拒绝|不同意|驳回|不批准|不允许|取消|放弃|暂缓|暂不|跳过|稍后|搁置|推迟)|(?:否)(?:[\s:：!！。,.]|$)|(?:reject(?:ed)?|deny|denied|decline(?:d)?|refuse(?:d)?|disapprove(?:d)?|cancel(?:led)?|defer(?:red)?|hold|skip(?:ped)?|later|postpone(?:d)?|ignore(?:d)?|abort|stop|no)(?:[\s:：!！。,.]|$))/i;
+const BENIGN_ZH_COMPOUNDS_RE =
+  /不错|不赖|不妨|不用等|不必等|不用犹豫|刻不容缓|迫不及待|毫不犹豫|义不容辞|不得不|特别|级别|类别|识别|区别|个别|判别|鉴别|分别|解禁|是否/g;
+
+const BENIGN_EN_PHRASES_RE =
+  /\b(?:no\s+(?:problem|problems|issue|issues|objection|objections|worries|doubt)|not\s+bad|(?:don['’]?t|do\s+not)\s+(?:hesitate|wait))\b/gi;
+
+const NEGATIVE_ZH_RE =
+  /不|别|勿|禁|拒绝|驳回|否决|否定|取消|放弃|终止|中止|停止|暂停|算了|罢了|作罢|暂缓|搁置|推迟|延后|跳过|稍后|以后再说|回头再说|先看|先查|先检查|先确认|先观望|先保留|先放着|再等等|等一下|等一等|等等|等会|慢着|且慢|缓一缓|留着|(?:^|[\s,，。!！:：;；])否(?:[\s,，。!！:：;；]|$)/;
+
+const NEGATIVE_EN_RE =
+  /\b(?:no|nope|nah|not|never|neither|none|don['’]?t|do\s+not|doesn['’]?t|does\s+not|didn['’]?t|did\s+not|won['’]?t|will\s+not|wouldn['’]?t|would\s+not|can['’]?t|cannot|can\s+not|shouldn['’]?t|should\s+not|mustn['’]?t|must\s+not|stop|stopped|cancel|cancelled|canceled|abort|aborted|reject|rejected|deny|denied|decline|declined|refuse|refused|disapprove|disapproved|forbid|forbidden|prohibit|prohibited|wait|waiting|hold|defer|deferred|postpone|postponed|pause|paused|skip|skipped|later|ignore|ignored)\b/i;
 
 /**
  * Expands `~` or `~/...` against `homeDir` (defaults to `os.homedir()`) and resolves to an absolute path.
@@ -97,7 +106,7 @@ function atomicWritePrivateJson(filePath: string, payload: unknown): void {
   }
 }
 
-function isApprovedChoice(choiceText: string): boolean {
+export function isApprovedChoice(choiceText: string): boolean {
   if (typeof choiceText !== "string") {
     return false;
   }
@@ -105,7 +114,16 @@ function isApprovedChoice(choiceText: string): boolean {
   if (trimmed.length === 0) {
     return false;
   }
-  return !REJECTION_CHOICE_RE.test(trimmed);
+  if (/[?？]\s*$/.test(trimmed)) {
+    return false;
+  }
+  const sanitized = trimmed
+    .replace(BENIGN_ZH_COMPOUNDS_RE, " ")
+    .replace(BENIGN_EN_PHRASES_RE, " ");
+  if (NEGATIVE_ZH_RE.test(sanitized) || NEGATIVE_EN_RE.test(sanitized)) {
+    return false;
+  }
+  return true;
 }
 
 function extractApprovedKeys(job: Job): string[] {

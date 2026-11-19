@@ -5,7 +5,8 @@
  * 1. Supervisor claiming/starting/submitting results against SQLite kernel without dropping
  *    slots or leaking secrets (`AUTOLOOP_OWNER_TOKEN`).
  * 2. In-place receipt repair (`repairPrompt`, max 2 attempts) on the original conversation
- *    accumulating usage instead of re-executing business logic, and failing cleanly after 2 tries.
+ *    accumulating usage instead of re-executing business logic, and settling via `discardReceipt`
+ *    with a warning `notice` card after 2 failed repairs.
  * 3. `stopRun` killing the entire `-pid` process group (`SIGTERM` -> `SIGKILL`) and committing
  *    `cancelled` after process exit rather than misclassifying non-zero exit as `failed` retry.
  * 4. Post-start process crashes (`fail_after_start`) preserving `session` without false repair loops.
@@ -417,7 +418,7 @@ describe("engine/supervisor.ts", () => {
     }
   });
 
-  it("caps in-place receipt repairs at 2 attempts and marks run failed with problem message", async () => {
+  it("caps in-place receipt repairs at 2 attempts and settles via discardReceipt with warning notice card", async () => {
     const tmpDir = makeTempDir();
     const autoloopHome = path.join(tmpDir, "autoloop_home");
     const workCwd = path.join(tmpDir, "workspace");
@@ -468,21 +469,30 @@ describe("engine/supervisor.ts", () => {
     try {
       await supervisor.kick();
       await waitFor(
-        () => harness.store.view.get("runs", "1")?.status === "queued",
+        () => harness.store.view.get("runs", "1")?.status === "done",
       );
 
-      // Kernel requeues attempt #1 -> queued for retry because attempts < MAX_ATTEMPTS,
-      // while preserving error, session, and accumulated 3-turn usage.
+      // Completed business run settles via discardReceipt as done (never requeued 10x),
+      // preserving summary, session, and accumulated 3-turn usage while raising a warning notice card.
       const run1 = harness.store.view.get("runs", "1");
+      assert.equal(run1?.status, "done");
       assert.equal(run1?.attempts, 1);
+      assert.equal(run1?.summary, "处理完成。");
       assert.equal(run1?.session, "conv-always-bad");
-      assert.match(String(run1?.error), /JSON 语法解析失败/);
+      assert.equal(run1?.error, null);
       assert.deepEqual(run1?.usage, {
         input: 150,
         output: 60,
         cached: 30,
         cost: 0.003,
       });
+
+      const cards = Array.from(harness.store.view.all("cards"));
+      assert.equal(cards.length, 1);
+      assert.equal(cards[0]?.kind, "notice");
+      assert.equal(cards[0]?.status, "open");
+      assert.equal(cards[0]?.title, "回执格式损坏已忽略");
+      assert.match(String(cards[0]?.text), /JSON 语法解析失败/);
 
       const records = readFileSync(recordFile, "utf8").trim().split("\n");
       assert.equal(records.length, 3); // 1 initial + 2 repairs max

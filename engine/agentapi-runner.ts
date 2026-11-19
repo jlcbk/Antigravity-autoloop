@@ -12,18 +12,9 @@ import os from "node:os";
 import path from "node:path";
 import { promptFor, readMessage } from "../protocol/receipt.ts";
 import type { Job, ParsedMessage, RunUsage } from "../protocol/types.ts";
+import { sanitizeRunnerEnv, type RunnerExecution } from "./agy-runner.ts";
 
-export interface RunnerExecution {
-  outcome: "done" | "nothing" | "failed" | "cancelled";
-  summary: string;
-  rawText: string;
-  parsed: ParsedMessage;
-  session: string | null;
-  started: boolean;
-  usage?: RunUsage;
-  error?: string;
-  exitCode: number | null;
-}
+export type { RunnerExecution };
 
 export interface AgentApiUiOptions {
   job: Job;
@@ -99,21 +90,7 @@ function buildSanitizedEnv(
   contextFile: string,
   guardFile: string,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(baseEnv)) {
-    const upper = key.toUpperCase();
-    if (
-      upper === "AUTOLOOP_OWNER_TOKEN" ||
-      upper === "ANTIGRAVITY_SIDECAR_UI_TOKEN"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  env.AUTOLOOP_RUN_ID = String(job.run);
-  env.AUTOLOOP_CONTEXT = contextFile;
-  env.AUTOLOOP_GUARD_FILE = guardFile;
-  return env;
+  return sanitizeRunnerEnv(baseEnv, job, contextFile, guardFile);
 }
 
 function renderSafeTitle(job: Job): string | undefined {
@@ -635,6 +612,8 @@ async function waitForTranscriptTurn(options: {
       started: true,
       error: "Cancelled by abort signal",
       exitCode: null,
+      timedOut: false,
+      cancelled: true,
     };
   }
 
@@ -649,6 +628,8 @@ async function waitForTranscriptTurn(options: {
       started: true,
       error: msg,
       exitCode: null,
+      timedOut: true,
+      cancelled: false,
     };
   }
 
@@ -776,6 +757,8 @@ async function waitForTranscriptTurn(options: {
         started: true,
         error: "Cancelled by abort signal",
         exitCode: null,
+        timedOut: false,
+        cancelled: true,
       });
     };
 
@@ -799,6 +782,8 @@ async function waitForTranscriptTurn(options: {
           started: true,
           error: msg,
           exitCode: null,
+          timedOut: true,
+          cancelled: false,
         });
       }, options.timeoutMs);
     }
@@ -863,6 +848,8 @@ export async function runAgentApiUi(
       started: false,
       error: "Cancelled by abort signal before start",
       exitCode: null,
+      timedOut: false,
+      cancelled: true,
     };
   }
 
@@ -912,6 +899,8 @@ export async function runAgentApiUi(
         started: false,
         error: msg,
         exitCode: cliResult.exitCode,
+        timedOut: true,
+        cancelled: false,
       };
     }
 
@@ -990,6 +979,8 @@ export async function runAgentApiUi(
         started: false,
         error: msg,
         exitCode: cliResult.exitCode,
+        timedOut: true,
+        cancelled: false,
       };
     }
 

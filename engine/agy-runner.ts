@@ -14,6 +14,8 @@ export interface RunnerExecution {
   usage?: RunUsage;
   error?: string;
   exitCode: number | null;
+  timedOut?: boolean;
+  cancelled?: boolean;
 }
 
 export interface RunAgyPrintOptions {
@@ -24,20 +26,26 @@ export interface RunAgyPrintOptions {
   agyBin?: string;
   baseEnv?: NodeJS.ProcessEnv;
   killGraceMs?: number;
+  postResultGraceMs?: number;
   onStarted?: (info: { session: string | null; pid: number }) => void;
   onProcess?: (proc: ChildProcess) => void;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
 
+export type RunAgyOptions = RunAgyPrintOptions;
+
 const DEFAULT_TIMEOUT_MINUTES = 60;
 const DEFAULT_KILL_GRACE_MS = 500;
+const DEFAULT_POST_RESULT_GRACE_MS = 30_000;
 const MAX_STDERR_CHARS = 8_000;
 
 const SENSITIVE_EXACT_KEYS = new Set([
   "AUTOLOOP_OWNER_TOKEN",
+  "AUTOLOOP_INGEST_TOKEN",
   "ANTIGRAVITY_SIDECAR_UI_TOKEN",
   "ANTIGRAVITY_SIDECAR_TOKEN",
+  "ANTIGRAVITY_CSRF_TOKEN",
   "ANTIGRAVITY_OWNER_TOKEN",
   "AUTOLOOP_ADMIN_TOKEN",
   "AUTOLOOP_IPC_TOKEN",
@@ -61,17 +69,20 @@ const START_CONFIRM_TYPES = new Set([
   "result",
 ]);
 
-function isSensitiveEnvKey(key: string): boolean {
+export function isSensitiveEnvKey(key: string): boolean {
   const upper = key.toUpperCase();
   if (SENSITIVE_EXACT_KEYS.has(upper)) {
     return true;
   }
+  if (upper.startsWith("ANTIGRAVITY_SIDECAR")) {
+    return true;
+  }
   if (
-    (upper.startsWith("AUTOLOOP_") ||
-      upper.startsWith("ANTIGRAVITY_SIDECAR")) &&
+    upper.startsWith("AUTOLOOP_") &&
     (upper.endsWith("_TOKEN") ||
       upper.endsWith("_SECRET") ||
-      upper.endsWith("_KEY"))
+      upper.endsWith("_KEY") ||
+      upper.endsWith("_PASSWORD"))
   ) {
     return true;
   }
@@ -373,6 +384,7 @@ function extractErrorText(event: Record<string, unknown>): string | null {
 
 interface StreamState {
   started: boolean;
+  sawFinalResult: boolean;
   session: string | null;
   resultText: string | null;
   lastAssistantText: string | null;
@@ -395,6 +407,7 @@ interface StreamState {
 function createStreamState(): StreamState {
   return {
     started: false,
+    sawFinalResult: false,
     session: null,
     resultText: null,
     lastAssistantText: null,
@@ -502,6 +515,7 @@ function processNdjsonLine(
       }
     }
   } else if (eventType === "result" && !isErrorEvent) {
+    state.sawFinalResult = true;
     const text =
       extractTextFromValue(event.result) ||
       extractTextFromValue(event.response) ||
@@ -617,6 +631,7 @@ export function runAgyPrint(
     agyBin,
     baseEnv = process.env,
     killGraceMs = DEFAULT_KILL_GRACE_MS,
+    postResultGraceMs = DEFAULT_POST_RESULT_GRACE_MS,
     onStarted,
     onProcess,
     signal,
@@ -633,6 +648,8 @@ export function runAgyPrint(
       started: false,
       error: "Aborted before process start",
       exitCode: null,
+      timedOut: false,
+      cancelled: true,
     });
   }
 
@@ -658,10 +675,13 @@ export function runAgyPrint(
     let stderrBuffer = "";
     let timedOut = false;
     let cancelled = false;
+    let graceTerminated = false;
     let settled = false;
     let killEscalationStarted = false;
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    let postResultTimer: ReturnType<typeof setTimeout> | null = null;
+    let forceCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
     const cleanupTimers = () => {
       if (timeoutTimer !== null) {
@@ -671,6 +691,14 @@ export function runAgyPrint(
       if (graceTimer !== null) {
         clearTimeout(graceTimer);
         graceTimer = null;
+      }
+      if (postResultTimer !== null) {
+        clearTimeout(postResultTimer);
+        postResultTimer = null;
+      }
+      if (forceCloseTimer !== null) {
+        clearTimeout(forceCloseTimer);
+        forceCloseTimer = null;
       }
       if (signal) {
         signal.removeEventListener("abort", handleAbort);
@@ -688,12 +716,50 @@ export function runAgyPrint(
         graceTimer = null;
         if (!settled) {
           signalProcessGroup(proc, "SIGKILL");
+          forceCloseTimer = setTimeout(() => {
+            forceCloseTimer = null;
+            if (!settled) {
+              proc.stdout?.destroy();
+              proc.stderr?.destroy();
+              finalize(null, "SIGKILL");
+            }
+          }, 100);
         }
       }, grace);
     };
 
+    const startPostResultGrace = () => {
+      if (
+        postResultTimer !== null ||
+        settled ||
+        cancelled ||
+        timedOut ||
+        !Number.isFinite(postResultGraceMs) ||
+        postResultGraceMs < 0
+      ) {
+        return;
+      }
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
+      postResultTimer = setTimeout(
+        () => {
+          postResultTimer = null;
+          if (settled || cancelled) {
+            return;
+          }
+          graceTerminated = true;
+          timedOut = false;
+          terminateGroup();
+        },
+        Math.max(0, postResultGraceMs),
+      );
+    };
+
     const handleAbort = () => {
       cancelled = true;
+      graceTerminated = false;
       terminateGroup();
     };
 
@@ -707,7 +773,12 @@ export function runAgyPrint(
     if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
       timeoutTimer = setTimeout(() => {
         timeoutTimer = null;
-        timedOut = true;
+        if (state.sawFinalResult && !cancelled) {
+          graceTerminated = true;
+          timedOut = false;
+        } else {
+          timedOut = true;
+        }
         terminateGroup();
       }, timeoutMs);
     }
@@ -727,6 +798,9 @@ export function runAgyPrint(
         const line = stdoutBuffer.slice(0, newlineIdx);
         stdoutBuffer = stdoutBuffer.slice(newlineIdx + 1);
         processNdjsonLine(line, state, notifyStarted);
+        if (state.sawFinalResult) {
+          startPostResultGrace();
+        }
         newlineIdx = stdoutBuffer.indexOf("\n");
       }
     });
@@ -772,11 +846,16 @@ export function runAgyPrint(
           usage,
           error: "Run cancelled by AbortSignal",
           exitCode,
+          timedOut: false,
+          cancelled: true,
         });
         return;
       }
 
-      if (timedOut) {
+      const effectiveTimedOut = graceTerminated ? false : timedOut;
+      const effectiveExitCode = graceTerminated ? 0 : exitCode;
+
+      if (effectiveTimedOut) {
         resolve({
           outcome: "failed",
           summary: "",
@@ -786,7 +865,9 @@ export function runAgyPrint(
           started: state.started,
           usage,
           error: `Run timed out after ${timeoutMs}ms`,
-          exitCode,
+          exitCode: effectiveExitCode,
+          timedOut: true,
+          cancelled: false,
         });
         return;
       }
@@ -802,17 +883,19 @@ export function runAgyPrint(
           usage,
           error: spawnError.message,
           exitCode: null,
+          timedOut: false,
+          cancelled: false,
         });
         return;
       }
 
-      if (exitCode !== 0) {
+      if (effectiveExitCode !== 0) {
         const detail =
           state.lastStreamError ??
           (stderrBuffer.trim() ||
             (exitSignal
               ? `Process killed by signal ${exitSignal}`
-              : `Process exited with code ${exitCode}`));
+              : `Process exited with code ${effectiveExitCode}`));
         resolve({
           outcome: "failed",
           summary: "",
@@ -822,7 +905,9 @@ export function runAgyPrint(
           started: state.started,
           usage,
           error: detail,
-          exitCode,
+          exitCode: effectiveExitCode,
+          timedOut: false,
+          cancelled: false,
         });
         return;
       }
@@ -841,7 +926,9 @@ export function runAgyPrint(
               parsed.problem ??
               (parsed.summary || undefined))
             : undefined,
-        exitCode,
+        exitCode: 0,
+        timedOut: false,
+        cancelled: false,
       });
     };
 

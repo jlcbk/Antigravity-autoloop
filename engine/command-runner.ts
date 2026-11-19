@@ -9,19 +9,10 @@ import os from "node:os";
 import path from "node:path";
 import { InputError } from "../kernel/errors.ts";
 import { readMessage } from "../protocol/receipt.ts";
-import type { Job, ParsedMessage, RunUsage } from "../protocol/types.ts";
+import type { Job, ParsedMessage } from "../protocol/types.ts";
+import { sanitizeRunnerEnv, type RunnerExecution } from "./agy-runner.ts";
 
-export interface RunnerExecution {
-  outcome: "done" | "nothing" | "failed" | "cancelled";
-  summary: string;
-  rawText: string;
-  parsed: ParsedMessage;
-  session: string | null;
-  started: boolean;
-  usage?: RunUsage;
-  error?: string;
-  exitCode: number | null;
-}
+export type { RunnerExecution };
 
 export interface CommandProbeOptions {
   job: Job;
@@ -35,6 +26,91 @@ export interface CommandProbeOptions {
 }
 
 const DEFAULT_KILL_GRACE_MS = 3_000;
+const STDOUT_HEAD_LIMIT_BYTES = 64 * 1024;
+const STDOUT_TAIL_LIMIT_BYTES = 512 * 1024;
+const STDERR_HEAD_LIMIT_BYTES = 64 * 1024;
+const STDERR_TAIL_LIMIT_BYTES = 256 * 1024;
+
+interface BoundedStreamCollector {
+  push(chunk: Buffer | string): void;
+  toString(): string;
+}
+
+function createBoundedStreamCollector(
+  headLimitBytes: number,
+  tailLimitBytes: number,
+): BoundedStreamCollector {
+  let totalBytes = 0;
+  let headBytes = 0;
+  let tailBytes = 0;
+  const headChunks: Buffer[] = [];
+  const tailChunks: Buffer[] = [];
+
+  function pushTail(part: Buffer): void {
+    if (part.length === 0) {
+      return;
+    }
+    if (part.length >= tailLimitBytes) {
+      tailChunks.length = 0;
+      tailChunks.push(part.subarray(part.length - tailLimitBytes));
+      tailBytes = tailLimitBytes;
+      return;
+    }
+    tailChunks.push(part);
+    tailBytes += part.length;
+    while (
+      tailChunks.length > 0 &&
+      tailBytes - tailChunks[0]!.length >= tailLimitBytes
+    ) {
+      const evicted = tailChunks.shift()!;
+      tailBytes -= evicted.length;
+    }
+    if (tailBytes > tailLimitBytes && tailChunks.length > 0) {
+      const excess = tailBytes - tailLimitBytes;
+      tailChunks[0] = tailChunks[0]!.subarray(excess);
+      tailBytes -= excess;
+    }
+  }
+
+  return {
+    push(chunk: Buffer | string): void {
+      const buf =
+        typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      if (buf.length === 0) {
+        return;
+      }
+      totalBytes += buf.length;
+      if (headBytes < headLimitBytes) {
+        const takeHead = Math.min(buf.length, headLimitBytes - headBytes);
+        headChunks.push(
+          takeHead === buf.length ? buf : buf.subarray(0, takeHead),
+        );
+        headBytes += takeHead;
+        if (takeHead < buf.length) {
+          pushTail(buf.subarray(takeHead));
+        }
+        return;
+      }
+      pushTail(buf);
+    },
+    toString(): string {
+      if (totalBytes === 0) {
+        return "";
+      }
+      if (totalBytes <= headLimitBytes + tailLimitBytes) {
+        return Buffer.concat([...headChunks, ...tailChunks]).toString("utf8");
+      }
+      const headStr = Buffer.concat(headChunks)
+        .toString("utf8")
+        .replace(/\uFFFD+$/g, "");
+      const tailStr = Buffer.concat(tailChunks)
+        .toString("utf8")
+        .replace(/^\uFFFD+/g, "");
+      const dropped = totalBytes - headBytes - tailBytes;
+      return `${headStr}\n...[autoloop truncated ${dropped} bytes]...\n${tailStr}`;
+    },
+  };
+}
 
 function expandHomePath(targetPath: string, homeDir = os.homedir()): string {
   if (targetPath === "~") {
@@ -52,21 +128,7 @@ function buildSanitizedEnv(
   contextFile: string,
   guardFile: string,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(baseEnv)) {
-    const upper = key.toUpperCase();
-    if (
-      upper === "AUTOLOOP_OWNER_TOKEN" ||
-      upper === "ANTIGRAVITY_SIDECAR_UI_TOKEN"
-    ) {
-      continue;
-    }
-    env[key] = value;
-  }
-  env.AUTOLOOP_RUN_ID = String(job.run);
-  env.AUTOLOOP_CONTEXT = contextFile;
-  env.AUTOLOOP_GUARD_FILE = guardFile;
-  return env;
+  return sanitizeRunnerEnv(baseEnv, job, contextFile, guardFile);
 }
 
 function killProcessGroup(proc: ChildProcess, signal: NodeJS.Signals): void {
@@ -133,6 +195,8 @@ export async function runCommandProbe(
       started: false,
       error: "Cancelled by abort signal before start",
       exitCode: null,
+      timedOut: false,
+      cancelled: true,
     };
   }
 
@@ -161,8 +225,14 @@ export async function runCommandProbe(
     let timedOut = false;
     let terminating = false;
 
-    const stdoutChunks: Buffer[] = [];
-    const stderrChunks: Buffer[] = [];
+    const stdoutCollector = createBoundedStreamCollector(
+      STDOUT_HEAD_LIMIT_BYTES,
+      STDOUT_TAIL_LIMIT_BYTES,
+    );
+    const stderrCollector = createBoundedStreamCollector(
+      STDERR_HEAD_LIMIT_BYTES,
+      STDERR_TAIL_LIMIT_BYTES,
+    );
 
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     let graceTimer: ReturnType<typeof setTimeout> | undefined;
@@ -237,15 +307,11 @@ export async function runCommandProbe(
     }
 
     proc.stdout?.on("data", (chunk: Buffer | string) => {
-      stdoutChunks.push(
-        typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk,
-      );
+      stdoutCollector.push(chunk);
     });
 
     proc.stderr?.on("data", (chunk: Buffer | string) => {
-      stderrChunks.push(
-        typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk,
-      );
+      stderrCollector.push(chunk);
     });
 
     proc.once("spawn", () => {
@@ -253,7 +319,7 @@ export async function runCommandProbe(
     });
 
     proc.once("error", (err: Error) => {
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stdout = stdoutCollector.toString();
       if (aborted || options.signal?.aborted) {
         finish({
           outcome: "cancelled",
@@ -264,6 +330,8 @@ export async function runCommandProbe(
           started,
           error: err.message,
           exitCode: null,
+          timedOut: false,
+          cancelled: true,
         });
         return;
       }
@@ -276,12 +344,14 @@ export async function runCommandProbe(
         started,
         error: err.message,
         exitCode: null,
+        timedOut: false,
+        cancelled: false,
       });
     });
 
     proc.once("close", (code: number | null) => {
-      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      const stdout = stdoutCollector.toString();
+      const stderr = stderrCollector.toString();
 
       if (aborted || options.signal?.aborted) {
         finish({
@@ -293,6 +363,8 @@ export async function runCommandProbe(
           started,
           error: "Cancelled by abort signal",
           exitCode: code,
+          timedOut: false,
+          cancelled: true,
         });
         return;
       }
@@ -308,6 +380,8 @@ export async function runCommandProbe(
           started,
           error: msg,
           exitCode: code,
+          timedOut: true,
+          cancelled: false,
         });
         return;
       }
@@ -327,6 +401,8 @@ export async function runCommandProbe(
             session: null,
             started: true,
             exitCode: 0,
+            timedOut: false,
+            cancelled: false,
           });
           return;
         }
@@ -342,6 +418,8 @@ export async function runCommandProbe(
             started: true,
             error: parsed.problem,
             exitCode: 0,
+            timedOut: false,
+            cancelled: false,
           });
           return;
         }
@@ -357,6 +435,8 @@ export async function runCommandProbe(
             ? { error: parsed.summary || "命令探针返回失败结论" }
             : {}),
           exitCode: 0,
+          timedOut: false,
+          cancelled: false,
         });
         return;
       }
@@ -375,6 +455,8 @@ export async function runCommandProbe(
         started,
         error: errDetail,
         exitCode: code,
+        timedOut: false,
+        cancelled: false,
       });
     });
   });
