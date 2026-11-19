@@ -72,4 +72,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/
   - 常驻 `SidecarApp` 承载右侧辅助面板 `sidecar://autoloop/hub/`（严格 `textContent` / DOM API 防 XSS 渲染）、本地 `fs.watch` 文件防抖触发器与参数隔离的 macOS `osascript` 原生通知；
   - Stdio MCP 服务 `autoloop_hub` 暴露 11 个 `autoloop_*` 工具，并在子代理环境下自动剥离管理审批工具防自批；
   - 双模 `autoloop` CLI（优先走 Sidecar IPC，离线无缝回退本地 SQLite）及 1 分钟闭环体验向导 `autoloop try`。
-- **内置技能库与五层验证体系（`skills/`、`tests/`、`sim/`）**：随包提供 `autoloop-admin` 及首批 6 大内置场景技能（`morning-brief`、`issue-triage`、`code-sweep`、`pr-delivery`、`health-watch`、`idea-to-sop`），配套 `purity.test.ts` 架构纯洁性静态扫描、200,000 步确定性混沌模拟（`sim/random.ts`）与真实子进程随机 `SIGKILL` 崩溃恢复压测（`sim/crash-harness.ts`）。
+- **内置技能库与五层验证体系（`skills/`、`tests/`、`sim/`）**：随包提供 `autoloop-admin` 及首批 6 大内置场景技能（`morning-brief`、`issue-triage`、`code-sweep`、`pr-delivery`、`health-watch`、`idea-to-sop`），配套 `purity.test.ts` 架构纯洁性静态扫描、200,000 步确定性混沌模拟（`sim/random.ts`）与真实子进程随机 `SIGKILL` 崩溃恢复压测（`sim/crash.ts`）。
