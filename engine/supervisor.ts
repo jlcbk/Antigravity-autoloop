@@ -289,8 +289,9 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
             });
           }
           default: {
-            const unknownRunner: never = targetJob.agent.runner;
-            throw new Error(`不支持的 Runner 类型: ${String(unknownRunner)}`);
+            throw new Error(
+              `不支持的 Runner 类型: ${String(targetJob.agent.runner)}`,
+            );
           }
         }
       };

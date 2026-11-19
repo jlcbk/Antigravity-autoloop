@@ -41,6 +41,7 @@ const AGENT_KEYS = new Set([
   "effort",
   "access",
   "command",
+  "target",
   "maxActive",
   "timeoutMinutes",
 ]);
@@ -69,6 +70,18 @@ const VALID_RUNNERS = new Set<RunnerKind>([
   "agentapi-ui",
   "command",
   "delivery",
+  "codex",
+  "claude",
+  "acp",
+  "herdr",
+]);
+const COMMAND_REQUIRED_RUNNERS = new Set<RunnerKind>(["command", "acp"]);
+const COMMAND_ALLOWED_RUNNERS = new Set<RunnerKind>([
+  "command",
+  "acp",
+  "codex",
+  "claude",
+  "herdr",
 ]);
 const VALID_EFFORTS = new Set<EffortLevel>([
   "low",
@@ -128,7 +141,7 @@ function parseAgent(agentId: string, raw: unknown): AgentProfile {
     !VALID_RUNNERS.has(obj.runner as RunnerKind)
   ) {
     throw new ProtocolInputError(
-      `${label}.runner 必须是 "agy-print"、"agentapi-ui"、"command" 或 "delivery"`,
+      `${label}.runner 必须是 "agy-print"、"agentapi-ui"、"command"、"delivery"、"codex"、"claude"、"acp" 或 "herdr"`,
     );
   }
   const runner = obj.runner as RunnerKind;
@@ -169,9 +182,9 @@ function parseAgent(agentId: string, raw: unknown): AgentProfile {
   }
 
   if (obj.command !== undefined) {
-    if (runner !== "command") {
+    if (!COMMAND_ALLOWED_RUNNERS.has(runner)) {
       throw new ProtocolInputError(
-        `${label}.command 仅允许用于 runner === "command"`,
+        `${label}.command 仅允许用于 runner 为 "command"、"acp"、"codex"、"claude" 或 "herdr"`,
       );
     }
     if (!Array.isArray(obj.command) || obj.command.length === 0) {
@@ -180,10 +193,23 @@ function parseAgent(agentId: string, raw: unknown): AgentProfile {
     profile.command = obj.command.map((arg, idx) =>
       assertNonEmptyString(arg, `${label}.command[${idx}]`),
     );
-  } else if (runner === "command") {
+  } else if (COMMAND_REQUIRED_RUNNERS.has(runner)) {
     throw new ProtocolInputError(
-      `${label}.command 在 runner === "command" 时必填`,
+      `${label}.command 在 runner === "${runner}" 时必填`,
     );
+  }
+
+  if (obj.target !== undefined) {
+    if (runner !== "herdr") {
+      throw new ProtocolInputError(
+        `${label}.target 仅允许用于 runner === "herdr"`,
+      );
+    }
+    const target = assertNonEmptyString(obj.target, `${label}.target`, 200);
+    if (CONTROL_CHAR_RE.test(target)) {
+      throw new ProtocolInputError(`${label}.target 不能包含控制字符`);
+    }
+    profile.target = target;
   }
 
   if (obj.maxActive !== undefined) {

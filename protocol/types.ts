@@ -21,7 +21,15 @@ export interface InboundEvent {
 }
 
 export type AccessTier = "read" | "edit" | "full";
-export type RunnerKind = "agy-print" | "agentapi-ui" | "command" | "delivery";
+export type RunnerKind =
+  | "agy-print"
+  | "agentapi-ui"
+  | "command"
+  | "delivery"
+  | "codex"
+  | "claude"
+  | "acp"
+  | "herdr";
 export type TellPolicy = "always" | "needed" | "never";
 export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -32,8 +40,16 @@ export interface AgentProfile {
   model?: string;
   effort?: EffortLevel;
   access?: AccessTier;
-  /** runner === "command" 时的可执行参数数组，如 ["node", "./probes/check.mjs"] */
+  /**
+   * 可执行命令与参数数组：
+   * - runner === "command" 或 "acp" 时必填（如 ["opencode", "acp"]）
+   * - runner === "codex"、"claude" 或 "herdr" 时可选（如 ["zcode"]、["dsh"]、["herdr", "--machine", "vps"]）
+   */
   command?: string[];
+  /**
+   * runner === "herdr" 时的目标选择器（如 "w3:p1"、"reviewer"、"kind:codex"、"spawn:opencode"）
+   */
+  target?: string;
   /** 跨所有规则最大同时运行轮数 */
   maxActive?: number;
   /** 单轮超时分钟数，默认 60 */
