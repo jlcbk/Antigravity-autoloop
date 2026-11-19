@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/
 
 ---
 
+## [1.2.0] - 2026-11-20
+
+本版本正式将执行层升级为 **「八模全通道执行矩阵（后台正规军 + 前台特种兵）」**，在不改动纯函数内核（`kernel/` 零修改）且保持零第三方运行时依赖的前提下，新增 **`codex`、`claude`（兼容 `zcode`/`dsh`）、`acp`（通用 Agent Client Protocol 万能口）、`herdr`（交互式常驻窗格/远程机器特种通道）** 四大外部执行器，并支持在本地分支交付流水线中配置 **跨厂商异构只读代码盲审（`reviewerRunner`）**。
+
+### Added
+
+- **外部原生流式双执行器 `codex` 与 `claude`（`engine/codex-runner.ts`、`engine/claude-runner.ts`）**：
+  - **`codex` 执行器**：原生对接 OpenAI Codex CLI（`codex exec --json` / `codex exec resume <thread_id> --json`），将 `access` 档位严格映射至内核沙箱（`read` → `--sandbox read-only`，`edit` → `--sandbox workspace-write`，`full` → `--sandbox danger-full-access`），支持 `model`、`effort`（`-c model_reasoning_effort=...`）透传、流式 `thread_id` 会话续接、Token `usage` 采集以及 `30s` `turn.completed` 退出宽限回收；
+  - **`claude` 执行器**：原生对接 Claude Code 及兼容包装命令（支持通过 `command: ["zcode"]` 或 `["dsh"]` 自定义可执行前缀），采用 `-p --verbose --output-format stream-json` 流式协议与 `--resume <session_id>` 无损会话续接，按 `access` 档位映射权限模式并提取 `session_id`、最终回复与成本用量。
+- **通用 `acp` 万能协议执行器与协议层安全门禁（`engine/acp-runner.ts`）**：
+  - 基于标准 Agent Client Protocol（stdio NDJSON JSON-RPC 2.0：`initialize` → `session/new` 或 `session/load` → `session/prompt`），一套适配器通吃 OpenCode（`command: ["opencode", "acp"]`）、Gemini CLI、Qwen Code、Goose、Kimi CLI 等所有 ACP 兼容智能体，当 `session/load` 不受支持或失败时优雅回退 `session/new`；
+  - **协议层 `session/request_permission` 硬安全门禁**：在 JSON-RPC 服务端回调层直接对工具调用请求执行三层控制面自保护（封锁 `guard.json`/`*.token`/`master.key`/`ipc.json` 与 `hub.db*` 写操作）、`access: "read"` 写操作拦截以及未获 `approvedKeys` 授权的 `askFirst` 高危命令拒绝（自动选择 `reject_once` 选项，无拒绝项时取消请求）。
+- **`herdr` 交互式常驻窗格/远程机器特种执行器与无损文件交接（`engine/herdr-runner.ts`）**：
+  - 对接 `herdr` tmux 窗格编排器，支持精确窗格 ID（`"w3:p1"`）、自定义别名（`"reviewer"`）、类型匹配（`"kind:codex"`）与按需拉起（`"spawn:opencode"`）四类 `target` 选择器，并支持通过 `command: ["herdr", "--machine", "<host>"]` 跨机器派发远程任务；
+  - **无损文件交接（File-Based Handoff）**：将完整任务提示词与 `context.json` 路径原子写入权限 `0600` 的运行级指令文件，仅向目标交互窗格发送短路径读取指令与唯一完成哨兵，彻底规避长文本多行 JSON 经 tmux `send-keys` 注入时的转义损坏与截断，再通过窗格状态轮询与 `pane read` 屏幕回滚缓冲精准提取末尾 `agent-autoloop` 回执。
+- **跨厂商真异构代码盲审配置（`delivery/snapshot.ts`、`delivery/reviewer.ts`）**：
+  - `.autoloop/delivery.json` 新增可选字段 `reviewerRunner?: "agy-print" | "codex" | "claude" | "acp"`（省略时默认 `"agy-print"` 100% 向后兼容）与 `reviewerCommand?: string[]`（`acp` 必填，`codex`/`claude` 可选自定义前缀，`agy-print` 禁止配置），实现 Gemini / Claude 开发分支由 OpenAI Codex 或 OpenCode 跨厂商独立只读盲审。
+- **八模角色池示例与全套管理技能升级（`examples/rules.starter.json`、`skills/`、`docs/03`）**：
+  - `examples/rules.starter.json` 新增 `codex-worker`、`claude-worker`、`opencode-acp`、`herdr-pane` 四个开箱即用角色示例；同步升级 `autoloop-admin` 八种 `runner` 选型矩阵与 `recipe-pr-delivery` 跨厂商审查配置指南。
+
+### Changed
+
+- **协议契约扩展（`protocol/types.ts`、`protocol/rules-schema.ts`、`engine/supervisor.ts`）**：
+  - `RunnerKind` 冻结枚举扩展为 `"agy-print" | "agentapi-ui" | "command" | "delivery" | "codex" | "claude" | "acp" | "herdr"`；
+  - `AgentProfile.command` 校验规则更新为 `command` / `acp` 必填、`codex` / `claude` / `herdr` 可选、`agy-print` / `agentapi-ui` / `delivery` 禁止配置；新增 `AgentProfile.target`（仅 `runner === "herdr"` 允许配置）；
+  - `Supervisor` 统一接入四大新执行器的运行目录隔离、环境变量脱敏、坏历史会话自动降级、原地 `repairPrompt` 回执修复与 `discardReceipt` 安全兜底。
+
+---
+
 ## [1.1.0] - 2026-11-19
 
 本版本聚焦**生产级容错自愈、跨进程 SQLite 并发一致性、三层控制面纵深防御、第 2 轮增量 Diff 异构审查降噪**，并正式内置第 7 套工业级自动化场景 **`recipe-ai-video-studio`（九阶段低抽卡率 AI 视频制片厂）**。全仓自动化测试扩展至 **60 个测试套件、201 个用例**。

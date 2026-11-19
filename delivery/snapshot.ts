@@ -22,6 +22,8 @@ import { isPlainObject } from "../protocol/validate.ts";
 
 export type MergeStrategy = "ff-only" | "merge" | "squash" | "gh-pr";
 
+export type ReviewerRunnerKind = "agy-print" | "codex" | "claude" | "acp";
+
 export type IncrementalFallbackReason =
   | "same_sha"
   | "invalid_prev_sha"
@@ -38,6 +40,8 @@ export interface DeliveryConfig {
   sensitivePaths?: string[];
   maxReviewRounds?: number;
   reviewerModels?: Record<string, string>;
+  reviewerRunner?: "agy-print" | "codex" | "claude" | "acp";
+  reviewerCommand?: string[];
 }
 
 export interface IncrementalDiffSnapshot {
@@ -98,12 +102,20 @@ const VALID_MERGE_STRATEGIES = new Set<MergeStrategy>([
   "squash",
   "gh-pr",
 ]);
+const VALID_REVIEWER_RUNNERS = new Set<ReviewerRunnerKind>([
+  "agy-print",
+  "codex",
+  "claude",
+  "acp",
+]);
 const DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 const DIFF_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const MAX_REVIEW_NOTES_CHARS = 16_000;
 const SAFE_COMMIT_SHA_RE = /^[0-9a-f]{7,64}$/i;
 // eslint-disable-next-line no-control-regex
 const UNSAFE_REF_CHAR_RE = /[\x00-\x1f\x7f\s]/;
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
 const REVIEW_HEADING_RE = /(?:审查|review)/i;
 const MARKDOWN_HEADING_RE = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
 
@@ -223,7 +235,7 @@ function parseOptionalNonEmptyString(
   return value.trim();
 }
 
-function parseDeliveryConfig(
+export function parseDeliveryConfig(
   rawText: string | null,
   fallbackBaseBranch: string,
 ): DeliveryConfig {
@@ -325,6 +337,53 @@ function parseDeliveryConfig(
       models[key] = val.trim();
     }
     config.reviewerModels = models;
+  }
+
+  if (parsed.reviewerRunner !== undefined) {
+    if (
+      typeof parsed.reviewerRunner !== "string" ||
+      !VALID_REVIEWER_RUNNERS.has(parsed.reviewerRunner as ReviewerRunnerKind)
+    ) {
+      throw new Error(
+        'delivery.reviewerRunner must be one of "agy-print", "codex", "claude", "acp"',
+      );
+    }
+    config.reviewerRunner = parsed.reviewerRunner as ReviewerRunnerKind;
+  }
+
+  const effectiveReviewerRunner: ReviewerRunnerKind =
+    config.reviewerRunner ?? "agy-print";
+
+  if (parsed.reviewerCommand !== undefined) {
+    if (effectiveReviewerRunner === "agy-print") {
+      throw new Error(
+        'delivery.reviewerCommand is not allowed when delivery.reviewerRunner is "agy-print" (or omitted)',
+      );
+    }
+    if (
+      !Array.isArray(parsed.reviewerCommand) ||
+      parsed.reviewerCommand.length === 0
+    ) {
+      throw new Error(
+        "delivery.reviewerCommand must be a non-empty array of strings",
+      );
+    }
+    config.reviewerCommand = parsed.reviewerCommand.map((entry, idx) => {
+      if (
+        typeof entry !== "string" ||
+        entry.trim().length === 0 ||
+        UNSAFE_CONTROL_CHAR_RE.test(entry)
+      ) {
+        throw new Error(
+          `delivery.reviewerCommand[${idx}] must be a non-empty string without control characters`,
+        );
+      }
+      return entry.trim();
+    });
+  } else if (effectiveReviewerRunner === "acp") {
+    throw new Error(
+      'delivery.reviewerCommand is required when delivery.reviewerRunner is "acp"',
+    );
   }
 
   return config;

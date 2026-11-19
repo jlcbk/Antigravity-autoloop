@@ -64,6 +64,38 @@
         "2"
       ],
       "timeoutMinutes": 2
+    },
+    "codex-worker": {
+      "name": "OpenAI Codex Exec Worker",
+      "runner": "codex",
+      "effort": "high",
+      "access": "edit",
+      "maxActive": 2,
+      "timeoutMinutes": 45
+    },
+    "claude-worker": {
+      "name": "Claude Code / ZCode Stream Worker",
+      "runner": "claude",
+      "effort": "high",
+      "access": "edit",
+      "maxActive": 2,
+      "timeoutMinutes": 45
+    },
+    "opencode-acp": {
+      "name": "OpenCode Universal ACP Worker",
+      "runner": "acp",
+      "command": ["opencode", "acp"],
+      "access": "edit",
+      "maxActive": 2,
+      "timeoutMinutes": 45
+    },
+    "herdr-pane": {
+      "name": "Herdr Interactive TUI Specialist",
+      "runner": "herdr",
+      "target": "kind:codex",
+      "access": "edit",
+      "maxActive": 1,
+      "timeoutMinutes": 45
     }
   },
   "rules": [

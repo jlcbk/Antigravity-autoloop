@@ -24,19 +24,19 @@ description: >-
 
 在主对话中优先使用以下 MCP 工具操控中台（工具名均带 `autoloop_` 前缀）：
 
-| 工具名                   | 权限类别 | 用途与使用时机                                                                                                             |
-| :----------------------- | :------- | :------------------------------------------------------------------------------------------------------------------------- |
-| `autoloop_status`        | 只读     | 查看待批 `open` 卡片、各规则流水线状态（运行中/空闲/已暂停）、今日与近 7 日轮次及 Token 消耗。                             |
-| `autoloop_why`           | 只读     | 按 `run` ID 查询完整因果账本（触发事件、规则版本、执行模型、工作区、Token 用量、回执明细与可跳转会话 ID）。                |
-| `autoloop_explain_rules` | 只读     | 对当前或草稿 `rules.json` 做 Schema 校验，解释事件路由去向、并发组与下次 Cron 触发时间。**修改规则前必须先用此工具校验。** |
-| `autoloop_answer`        | 本人管理 | 在聊天框代用户批复指定 `open` 提问卡（传入 `card` 与 `choice` 下标或自由文本 `text`），原子唤醒原会话续办。                |
-| `autoloop_resolve`       | 本人管理 | 将已过时或核实无需再处理的卡片标记结案（传入 `card` 与 `reason`）。                                                        |
+| 工具名                   | 权限类别 | 用途与使用时机                                                                                                                                                 |
+| :----------------------- | :------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `autoloop_status`        | 只读     | 查看待批 `open` 卡片、各规则流水线状态（运行中/空闲/已暂停）、今日与近 7 日轮次及 Token 消耗。                                                                 |
+| `autoloop_why`           | 只读     | 按 `run` ID 查询完整因果账本（触发事件、规则版本、执行模型、工作区、Token 用量、回执明细与可跳转会话 ID）。                                                    |
+| `autoloop_explain_rules` | 只读     | 对当前或草稿 `rules.json` 做 Schema 校验，解释事件路由去向、并发组与下次 Cron 触发时间。**修改规则前必须先用此工具校验。**                                     |
+| `autoloop_answer`        | 本人管理 | 在聊天框代用户批复指定 `open` 提问卡（传入 `card` 与 `choice` 下标或自由文本 `text`），原子唤醒原会话续办。                                                    |
+| `autoloop_resolve`       | 本人管理 | 将已过时或核实无需再处理的卡片标记结案（传入 `card` 与 `reason`）。                                                                                            |
 | `autoloop_emit`          | 事件投递 | 向中台注入标准本地事件（如触发 `idea.ingest`、`git.branch.ready` 或手动测试事件），按 `source + id` 幂等去重；事件 `link` 仅允许 `http://` 或 `https://` URL。 |
-| `autoloop_pause`         | 本人管理 | 暂停指定规则（支持 `until` 定时自动恢复），暂停期间跳过事件仅记录不积压。                                                  |
-| `autoloop_resume`        | 本人管理 | 恢复已暂停的规则，并返回暂停期间跳过的事件列表供决定是否补跑。                                                             |
-| `autoloop_replay`        | 本人管理 | 按 `since` 对暂停期间跳过的事件执行补跑（每条仅补一次，避免雪崩）。                                                        |
-| `autoloop_run`           | 本人管理 | 立即手动触发指定规则执行一轮。                                                                                             |
-| `autoloop_stop`          | 本人管理 | 强制停止运行中或排队中的轮次（先 `SIGTERM` 后 `SIGKILL` 清理进程组；内核强制归入 `cancelled`，绝不触发失败重试）。         |
+| `autoloop_pause`         | 本人管理 | 暂停指定规则（支持 `until` 定时自动恢复），暂停期间跳过事件仅记录不积压。                                                                                      |
+| `autoloop_resume`        | 本人管理 | 恢复已暂停的规则，并返回暂停期间跳过的事件列表供决定是否补跑。                                                                                                 |
+| `autoloop_replay`        | 本人管理 | 按 `since` 对暂停期间跳过的事件执行补跑（每条仅补一次，避免雪崩）。                                                                                            |
+| `autoloop_run`           | 本人管理 | 立即手动触发指定规则执行一轮。                                                                                                                                 |
+| `autoloop_stop`          | 本人管理 | 强制停止运行中或排队中的轮次（先 `SIGTERM` 后 `SIGKILL` 清理进程组；内核强制归入 `cancelled`，绝不触发失败重试）。                                             |
 
 > **权限隔离机制**：当子代理处于 Autoloop 调度上下文中（环境变量含 `AUTOLOOP_RUN_ID`）时，`mcp/server.mjs` 会自动剥离 `autoloop_answer`、`autoloop_resolve`、`autoloop_pause`、`autoloop_stop` 等本人管理权限，彻底防止子代理「自己批自己的奏折」。
 
@@ -64,16 +64,28 @@ description: >-
 - `agents`（对象）：定义可调度的执行角色池。
 - `rules`（数组）：定义事件或定时触发路由规则（`name` 不能重复）。
 
-### 2.2 四种 `runner` 与模型分工策略
+### 2.2 八种 `runner` 全景矩阵与选型指南
 
-每个 `agents.<id>` 允许字段为 `name`（全池唯一）、`runner`、`model`、`effort`、`access`、`command`、`maxActive`、`timeoutMinutes`：
+每个 `agents.<id>` 允许字段为 `name`（全池唯一）、`runner`、`model`、`effort`、`access`、`command`、`target`、`maxActive`、`timeoutMinutes`：
 
-| `runner` 值     | 适用场景                                                                 | 关键配置与分工建议                                                                                                                                                                                                                                                                                                                                                                    |
-| :-------------- | :----------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `"agy-print"`   | **主力无头执行器**（单轮完成即退出进程，支持 `--conversation` 无损续接） | 支持 `model`、`effort`（`low`/`medium`/`high`/`xhigh`/`max`）、`access`（`read`/`edit`/`full`，默认 `edit`）。<br/>• `gemini-4-hydrogen-medium` / `high`：每日晨报、代码大扫除、日常运维、新观点拆解统筹；<br/>• `gemini-4-hydrogen-xhigh`：高复杂度架构排障、异构只读安全审查（配 `access: "read"`）；<br/>• `gemini-4-carbon-high`：主力功能开发（与 Hydrogen 形成异构开发/互审）。 |
-| `"agentapi-ui"` | **可视化交互会话 / 浏览器子代理场景**                                    | 需打开客户端可见会话或联动内置 `browser` 子代理时使用，支持 `new-conversation` 与 `send-message` 续接。                                                                                                                                                                                                                                                                               |
-| `"command"`     | **零 Token 本地探针**                                                    | **必须**提供非空参数数组 `command`（如 `["node", "./probes/check.mjs"]`）；非 `command` 类型严禁配置该字段。无变化退出码 0 不消费任何模型 Token。                                                                                                                                                                                                                                     |
-| `"delivery"`    | **本地异构审查与隔离 Worktree 交付器**                                   | 用于接管 `git.branch.ready` 等分支交付事件，执行只读 Diff 审查与临时 Worktree 检查合并。                                                                                                                                                                                                                                                                                              |
+- **`command` 校验约束**：当 `runner` 为 `"command"` 或 `"acp"` 时**必填**非空字符串数组；为 `"codex"`、`"claude"` 或 `"herdr"` 时**可选**（用于覆盖可执行程序或追加连接参数）；为 `"agy-print"`、`"agentapi-ui"` 或 `"delivery"` 时**严禁配置**。
+- **`target` 校验约束**：**仅允许**在 `runner === "herdr"` 时配置（最长 200 字符，禁止控制字符），其他任何 `runner` 配置该字段将直接被静态校验拒收。
+
+| `runner` 值     | 阵营定位与适用场景                                                        | 关键配置、协议特性与分工建议                                                                                                                                                                                                                                                                                                                                                                   |
+| :-------------- | :------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `"agy-print"`   | **Antigravity 原生主力无头执行器**（后台正规军，单轮完结即退出）          | 支持 `model`、`effort`（`low`/`medium`/`high`/`xhigh`/`max`）、`access`（`read`/`edit`/`full`，默认 `edit`）与 `--conversation` 无损续接。<br/>• `gemini-4-hydrogen-medium` / `high`：每日晨报、代码大扫除、日常分诊；<br/>• `gemini-4-hydrogen-xhigh`：高复杂度排障、只读安全审查；<br/>• `gemini-4-carbon-high`：复杂架构与核心功能开发。                                                    |
+| `"agentapi-ui"` | **Antigravity 可视化交互会话 / 浏览器联动**                               | 需打开客户端可见会话或联动内置 `browser` 子代理时使用，支持 `new-conversation` 与 `send-message` 续接。                                                                                                                                                                                                                                                                                        |
+| `"codex"`       | **OpenAI Codex 原生流式无头执行器**（后台正规军，跨厂商开发/盲审首选）    | 默认调用 `codex`（可通过 `command` 自定义前缀），运行 `exec --json` / `exec resume <thread_id> --json`。<br/>• 原生内核沙箱映射：`read` → `--sandbox read-only`，`edit` → `--sandbox workspace-write`，`full` → `--sandbox danger-full-access`；<br/>• 支持 `model` 与 `effort`（映射为 `-c model_reasoning_effort=<level>`），保留真实 `thread_id` 与用量。                                   |
+| `"claude"`      | **Claude Code / `zcode` / `dsh` 原生流式执行器**（后台正规军）            | 默认调用 `claude`；对接第三方兼容 CLI 或路由包装器时配置 **`"command": ["zcode"]`** 或 **`"command": ["dsh"]`**。<br/>• 采用 `-p --verbose --output-format stream-json` 流式输出与 `--resume <session_id>` 无损续接，支持 `model`、`effort` 与 `access` 权限档位映射。                                                                                                                         |
+| `"acp"`         | **通用 Agent Client Protocol 万能协议口**（后台正规军，一套适配通吃群雄） | **必须**提供 `command`（如 **`"command": ["opencode", "acp"]`**，同样通吃 Gemini CLI、Qwen Code、Goose、Kimi CLI 等 ACP 智能体）。<br/>• 基于 stdio NDJSON JSON-RPC 2.0（`session/new` / `session/load` → `session/prompt`）；<br/>• **协议级安全门禁**：在 `session/request_permission` 回调层硬性拦截控制面密级文件、`access: "read"` 写操作与未授权 `askFirst`。                            |
+| `"herdr"`       | **交互式常驻 tmux 窗格 / 远程机器特种通道**（前台特种兵）                 | 对接 `herdr` 编排器，适合**纯 TUI 无头受限工具、需复用交互态登录会话、绕过仅限交互终端渠道限制或跨机 SSH 调度**。<br/>• `target` 选择器支持：精确窗格 **`"w3:p1"`**、窗格别名 **`"reviewer"`**、按类型匹配空闲窗格 **`"kind:codex"`**、按需拉起新窗格 **`"spawn:opencode"`**；<br/>• 远程机器用法：配置 **`"command": ["herdr", "--machine", "vps"]`**；采用 `0600` 私有文件无损交接长提示词。 |
+| `"delivery"`    | **本地异构审查与隔离 Worktree 五步交付器**                                | 接管 `git.branch.ready` 分支交付事件，执行只读裸快照提取、跨模型/跨厂商（`reviewerRunner`）盲审、临时 Worktree 门禁检查与原子合并。                                                                                                                                                                                                                                                            |
+| `"command"`     | **零 Token 静默本地探针**                                                 | **必须**提供非空参数数组 `command`（如 `["node", "./probes/check.mjs"]`）。无状态变化时退出码 `0` 静默结束，零模型 Token 消耗。                                                                                                                                                                                                                                                                |
+
+> **选型黄金法则（后台正规军 + 前台特种兵互补）**：
+>
+> 1. 日常 90% 的自动化流水线（定时巡检、并发 Issue 分诊、自动交付盲审）优先选用 **`agy-print` / `codex` / `claude` / `acp` 后台正规军**——单轮结束立即释放进程（等待人类「批红」期间 **0 进程驻留、0 内存占用**），且具备 OS 沙箱或协议级权限拦截。
+> 2. 当目标工具仅提供纯 TUI 交互界面、渠道限制非交互 headless 调用，或任务需要跑在远端开发机/GPU 机器的常驻 tmux 会话中时，派发给 **`herdr` 前台特种兵**。
 
 ### 2.3 `rules[]` 核心字段与三大触发器
 
@@ -153,6 +165,40 @@ description: >-
       "access": "read",
       "maxActive": 2,
       "timeoutMinutes": 30
+    },
+    "codex-worker": {
+      "name": "OpenAI Codex Exec Worker",
+      "runner": "codex",
+      "effort": "high",
+      "access": "edit",
+      "maxActive": 2,
+      "timeoutMinutes": 45
+    },
+    "zcode-worker": {
+      "name": "ZCode Claude Stream Worker",
+      "runner": "claude",
+      "command": ["zcode"],
+      "effort": "high",
+      "access": "edit",
+      "maxActive": 2,
+      "timeoutMinutes": 45
+    },
+    "opencode-acp": {
+      "name": "OpenCode Universal ACP Worker",
+      "runner": "acp",
+      "command": ["opencode", "acp"],
+      "access": "edit",
+      "maxActive": 2,
+      "timeoutMinutes": 45
+    },
+    "herdr-remote": {
+      "name": "Herdr Remote Pane Specialist",
+      "runner": "herdr",
+      "command": ["herdr", "--machine", "vps"],
+      "target": "w3:p1",
+      "access": "edit",
+      "maxActive": 1,
+      "timeoutMinutes": 45
     }
   },
   "rules": [
@@ -213,20 +259,22 @@ description: >-
 
 ## 4. 运行容错机制、安全边界与日常排障操作流程
 
-### 4.1 V1.1.0 核心运行容错与自保护机制
+### 4.1 V1.2.0 核心运行容错与多通道自保护机制
 
-排查状态或解释系统行为时，需知悉中台内置的五项确定性保护机制：
+排查状态或解释系统行为时，需知悉中台内置的六项确定性保护机制：
 
 1. **跨进程并发写库安全（`commitLatest`）**：当 CLI 处于本地 SQLite 回退模式与常驻 Sidecar 并发访问 `hub.db` 时，`commitLatest` 会在 `BEGIN IMMEDIATE` 事务锁内自动增量追平其他进程新写入的 `facts`，再执行状态转移，确保零冲突与异常零脏写。
 2. **`discardReceipt` 防副作用重跑与坏会话自愈**：
    - 若首轮业务已完成（退出码 `0` 且结论为 `done`/`nothing`），但末尾回执经 2 次原会话 `repairPrompt` 仍格式损坏，Supervisor 会自动丢弃坏回执保留已完成业务状态（`done` 时生成「回执格式损坏已忽略」人工核查 `notice` 卡），绝不触发 10 次失败重做；
-   - 若续接失效历史 `conversationId` 未启动即非零退出（`!started`），自动降级为全新会话执行并补报新 `session`；`agy-print` 输出最终 `result` 帧后享有 `30s` 退出宽限回收。
+   - 若续接失效历史会话（`conversationId` / `thread_id` / `session_id` / ACP `sessionId`）未启动即非零退出（`!started`），自动降级为全新会话执行并补报新 `session`；`agy-print` / `codex` 输出最终完成帧后享有 `30s` 退出宽限回收。
 3. **`60s` 指数退避与第 3 次连续失败预警卡**：轮次失败默认按 `60s * 2^(attempt-1)` 指数退避重试（上限 30 分钟，最多 10 次）；连续第 **3** 次失败时自动生成 `key = "sys:retry-streak-warn"` 的末行精简错误预警卡，且在该事项后续成功恢复后自动结案。
 4. **`tell: "always"` 自动简报与 `[<rule>]` 通知前缀**：所有桌面系统通知标题均携带 `[<rule>]` 前缀便于识别来源规则；配置 `tell: "always"` 的规则在静默完成时也会自动落盘 `fyi: true` 简报卡并推送通知。
-5. **`PreToolUse` 三层控制面分级自保护**：
+5. **多通道分层安全硬门禁（`PreToolUse` + 原生沙箱 + `ACP` 协议拦截）**：
    - **密级零访问**：`guard.json`、`owner.token`、`ingest.token`、`master.key`、`ipc.json` 严禁任何工具或命令读写；
    - **数据库防篡改**：`hub.db`（含 `-wal`/`-shm`）严禁直接读写篡改（仅放行 `ls`/`stat`/`file` 查看元信息）；
-   - **上下文与规则只读放行**：`context.json` 与 `rules.json` 允许通过文件读取工具或安全只读命令（如 `cat`、`head`、`tail`、`sed -n`、`nl`、非原地 `awk`、`jq`、`python3 -m json.tool`、只读 `git`、`autoloop check|explain|status|why`）查看，但严厉拦截重定向写入、`sed -i` 及 `node -e` / `python -c` 内联写意图。
+   - **上下文与规则只读放行**：`context.json` 与 `rules.json` 允许通过文件读取工具或安全只读命令查看，严厉拦截重定向写入、`sed -i` 及 `node -e` / `python -c` 内联写意图；
+   - **`ACP` 协议级 `session/request_permission` 拦截**：`acp` 执行器在 JSON-RPC 回调层直接核验 `access` 档位、控制面密级路径与 `approvedKeys`，越权操作当场返回 `reject_once`。
+6. **`Herdr` 无损文件交接**：`herdr` 执行器通过 `0600` 私有任务指令文件投递完整提示词与 `context.json` 路径，规避 tmux `send-keys` 长文本转义损坏，并通过完成哨兵读取屏幕回滚缓冲提取回执。
 
 ### 4.2 修改或新增规则的标准流程
 

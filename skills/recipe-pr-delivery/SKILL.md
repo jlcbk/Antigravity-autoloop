@@ -35,9 +35,9 @@ description: >-
 1. **裸对象提取（`extractBranchSnapshot` & `extractIncrementalDiff`）**：
    - 计算 `merge-base(<baseBranch>, <targetRef>)`，直接导出 `git diff <merge-base>..<head>` 到权限 `0o600` 的只读 `diff.patch` 与 `--stat`、`--name-only` 列表。
    - 当进入**第 2+ 轮复审**且上一轮存在未决 `blocking` 问题时，若上一轮已审提交 `prevSha` 是当前 `headSha` 在同一分叉基线上的合法祖先，自动额外提取 `prevSha..headSha` 增量补丁（`incremental-diff.patch`）。
-2. **异构模型互审（`selectHeterogeneousReviewerModel`）**：
-   - 作者模型为 `hydrogen` 系列时，默认切换 `gemini-4-carbon-high` 审查；
-   - 作者模型为 `carbon` / `claude` / `opus` / `sonnet` 或未指明时，默认切换 `gemini-4-hydrogen-xhigh` 审查（亦可通过 `.autoloop/delivery.json` 的 `reviewerModels` 显式映射）。
+2. **跨模型与跨厂商真异构只读互审（`selectHeterogeneousReviewerModel` & `reviewerRunner`）**：
+   - **默认同端异构互审（`reviewerRunner: "agy-print"` 或省略）**：作者模型为 `hydrogen` 系列时默认切换 `gemini-4-carbon-high` 审查；作者模型为 `carbon` / `claude` / `opus` / `sonnet` 或未指明时默认切换 `gemini-4-hydrogen-xhigh` 审查（亦可通过 `.autoloop/delivery.json` 的 `reviewerModels` 显式映射）。
+   - **跨厂商真异构只读盲审（`reviewerRunner`）**：可在主干 `.autoloop/delivery.json` 中显式配置 `reviewerRunner`（如 `"codex"`、`"claude"` 或 `"acp"`）与 `reviewerCommand`，将 **Gemini / Claude 开发分支交由外部 OpenAI Codex（`codex exec --sandbox read-only`）或 OpenCode ACP（`opencode acp` + 协议层只读权限拦截）执行零历史上下文的真异构盲审**，彻底消除同源模型家族的共性盲区。
 3. **两级审查准则与降误报纪律**：
    - **必填真实触发路径（`how`）**：每条 `"severity": "blocking"` 发现必须在 `detail` / `text` 或专用 `how` 字段中写明**在当前调用链下如何发生的真实触发路径**；说不出具体触发路径的理论担忧或多重极端巧合竞态一律归为非阻塞 `"warning"` / `"info"`，严禁阻断合并。
    - **同类问题归并单条**：同一成因或同类缺陷必须合并为单条 finding（列出全部涉及的文件与行号），禁止拆成多条刷屏。
@@ -87,9 +87,9 @@ description: >-
 
 ---
 
-## 2. `.autoloop/delivery.json` 标准配置示例（提交至 `main`）
+## 2. `.autoloop/delivery.json` 标准配置与跨厂商盲审选项（提交至 `main`）
 
-> 注：`maxReviewRounds` 省略时**默认为 `2` 轮**（第 1 轮全量审查 + 第 2 轮增量 Diff 定向复核后未过即转人工）；下方示例展示显式覆盖为 `3` 轮的完整配置写法。
+> 注：`maxReviewRounds` 省略时**默认为 `2` 轮**（第 1 轮全量审查 + 第 2 轮增量 Diff 定向复核后未过即转人工）；`reviewerRunner` 省略时**默认为 `"agy-print"`**（100% 向后兼容）。下方示例展示显式覆盖 `maxReviewRounds: 3` 并启用 OpenAI `codex` 跨厂商只读盲审的完整写法：
 
 ```json
 {
@@ -106,12 +106,22 @@ description: >-
     "hooks/**"
   ],
   "maxReviewRounds": 3,
+  "reviewerRunner": "codex",
   "reviewerModels": {
-    "gemini-4-hydrogen-high": "gemini-4-carbon-high",
-    "gemini-4-carbon-high": "gemini-4-hydrogen-xhigh"
+    "gemini-4-hydrogen-high": "gpt-5.4",
+    "gemini-4-carbon-high": "gpt-5.4"
   }
 }
 ```
+
+### `reviewerRunner` 与 `reviewerCommand` 校验契约一览
+
+| `reviewerRunner` 取值     | `reviewerCommand` 规则                             | 典型跨厂商盲审场景与安全沙箱机制                                                                                                 |
+| :------------------------ | :------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
+| `"agy-print"`（默认可省） | **严禁配置**（配置即报错）                         | Antigravity 内生 Hydrogen ↔ Carbon 异构模型只读沙箱（`--mode plan --sandbox`）互审。                                             |
+| `"codex"`                 | 可选自定义前缀数组（如 `["codex"]`）               | **Gemini / Claude 代码由 OpenAI Codex 跨厂商盲审**，强制运行于 `--sandbox read-only` 无记忆只读模式。                            |
+| `"claude"`                | 可选自定义前缀数组（如 `["zcode"]`、`["dsh"]`）    | **Gemini / OpenAI 代码由 Claude Code / ZCode 跨厂商盲审**，强制只读工具集与无会话残留。                                          |
+| `"acp"`                   | **必填**非空字符串数组（如 `["opencode", "acp"]`） | **通过通用 ACP 协议调用 OpenCode / Qwen / Kimi 盲审**，在 JSON-RPC `session/request_permission` 层强制拒绝一切写文件与危险命令。 |
 
 ---
 

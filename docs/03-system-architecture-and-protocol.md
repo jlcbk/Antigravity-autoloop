@@ -22,10 +22,10 @@ flowchart TB
         TICK["时钟与事件源管理器<br/>Cron 驱动 · fs.watch · 本地探针调度"]
     end
 
-    subgraph Execution["原生执行与护栏层 (Execution & Lifecycle Guards)"]
-        ENG["双模执行引擎 (engine/)<br/>agy-print · agentapi-ui · command-probe"]
-        HOOKS["生命周期硬钩子 (hooks/)<br/>PreToolUse (askFirst/access) · Stop (回执语法预检)"]
-        DELIV["本地异构审查交付器 (delivery/)<br/>只读 Git 快照审查 · 隔离 Worktree 验证"]
+    subgraph Execution["多引擎执行与护栏层 (Multi-Engine Execution & Lifecycle Guards)"]
+        ENG["八模全通道执行引擎 (engine/)<br/>agy-print · agentapi-ui · codex · claude · acp · herdr · command"]
+        HOOKS["生命周期与协议硬钩子 (hooks/ & acp)<br/>PreToolUse · ACP request_permission · Stop"]
+        DELIV["跨厂商异构审查交付器 (delivery/)<br/>只读 Git 快照审查 (reviewerRunner) · 隔离 Worktree 验证"]
     end
 
     subgraph Core["纯函数确定性内核层 (Zero-IO Deterministic Core)"]
@@ -75,18 +75,22 @@ Antigravity-autoloop/
 │   ├── query.ts                       # 规则路由匹配、同 (grp, lane) 并发互斥、卡片视图与因果链查询
 │   ├── decide.ts                      # 唯一状态转移入口 decide(view, input, now, env)
 │   └── store.ts                       # node:sqlite 单事务账本（commit / commitLatest 跨进程增量追平与指纹重建）
-├── engine/                            # [Antigravity 原生执行层]
+├── engine/                            # [八模全通道执行层]
 │   ├── context-file.ts                # 生成每轮隔离的 context.json 与 guard.json（0600 权限 + 否定批复防误授权限）
 │   ├── agy-runner.ts                  # 调用 `agy -p --output-format stream-json --conversation ...`（含流式 result 后 30s 宽限回收）
 │   ├── agentapi-runner.ts             # 调用 `agentapi new-conversation / send-message` + transcript 监听
+│   ├── codex-runner.ts                # 调用 `codex exec --json` / `exec resume`（原生内核沙箱映射 + reasoning effort + 30s 宽限回收）
+│   ├── claude-runner.ts               # 调用 `claude` / `zcode` / `dsh` `-p --verbose --output-format stream-json` + `--resume`
+│   ├── acp-runner.ts                  # 通用 Agent Client Protocol（NDJSON JSON-RPC 2.0，通吃 opencode/gemini/qwen/goose/kimi + 协议级权限拦截）
+│   ├── herdr-runner.ts                # 交互式常驻 tmux 窗格 / `--machine` 远程执行器（target 选择器 + 0600 文件无损交接 + 屏幕缓冲回执提取）
 │   ├── command-runner.ts              # 零 Token 本地脚本执行器（execFile 参数数组隔离）
-│   └── supervisor.ts                  # Worker 领单、心跳续租、坏会话自动降级、回执二次修复与 discardReceipt 兜底结案
+│   └── supervisor.ts                  # Worker 领单、心跳续租、多引擎派发、坏会话自动降级、回执二次修复与 discardReceipt 兜底结案
 ├── hooks/                             # [Antigravity 生命周期硬护栏]
 │   ├── pre-tool-guard.mjs             # PreToolUse 入口：三层控制面自保护 + 子 Shell/内联脚本穿透拦截 access 与 askFirst
 │   └── stop-receipt-check.mjs         # Stop 入口：检测残缺/非法 agent-autoloop 代码块并要求当场重写
-├── delivery/                          # [本地异构审查与自动交付层]
-│   ├── snapshot.ts                    # 从裸 Git 对象提取只读 diff.patch 与第 2 轮起 prevSha..headSha 增量补丁（纯 *.md 自动回退）
-│   ├── reviewer.ts                    # 调度异构模型执行只读审查（默认 ≤2 轮、30m 超时、第 2 轮增量 Diff 定向复核、跨分支名 SHA 缓存）
+├── delivery/                          # [跨厂商异构审查与自动交付层]
+│   ├── snapshot.ts                    # 从裸 Git 对象提取受信任 delivery.json（含 reviewerRunner/reviewerCommand 校验）、只读 diff.patch 与增量补丁
+│   ├── reviewer.ts                    # 调度同端或跨厂商模型执行只读审查（默认 ≤2 轮、30m 超时、第 2 轮增量 Diff 定向复核、跨分支名 SHA 缓存）
 │   └── pipeline.ts                    # Review -> Worktree Check -> Merge -> Verify 状态机驱动
 ├── sidecars/
 │   └── hub/                           # [常驻宿主与辅助面板 Web UI]
@@ -155,18 +159,36 @@ export interface InboundEvent {
 
 ```ts
 export type AccessTier = "read" | "edit" | "full";
-export type RunnerKind = "agy-print" | "agentapi-ui" | "command" | "delivery";
+export type RunnerKind =
+  | "agy-print"
+  | "agentapi-ui"
+  | "command"
+  | "delivery"
+  | "codex"
+  | "claude"
+  | "acp"
+  | "herdr";
 export type TellPolicy = "always" | "needed" | "never";
+export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface AgentProfile {
   name: string;
   runner: RunnerKind;
-  /** Antigravity 内部模型 ID，例如 "gemini-4-hydrogen-high"、"gemini-4-carbon-high" */
+  /** 模型标识 ID（如 "gemini-4-hydrogen-high"、"gemini-4-carbon-high"、"gpt-5.4"） */
   model?: string;
-  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  effort?: EffortLevel;
   access?: AccessTier;
-  /** runner === "command" 时的可执行参数数组，如 ["node", "./probes/check.mjs"] */
+  /**
+   * 可执行命令与参数数组：
+   * - runner === "command" 或 "acp" 时必填（如 ["node", "./probes/check.mjs"]、["opencode", "acp"]）
+   * - runner === "codex"、"claude" 或 "herdr" 时可选（如 ["zcode"]、["dsh"]、["herdr", "--machine", "vps"]）
+   * - runner === "agy-print"、"agentapi-ui" 或 "delivery" 时禁止配置
+   */
   command?: string[];
+  /**
+   * runner === "herdr" 时的目标选择器（如 "w3:p1"、"reviewer"、"kind:codex"、"spawn:opencode"；其他 runner 禁止配置）
+   */
+  target?: string;
   /** 跨所有规则最大同时运行轮数 */
   maxActive?: number;
   /** 单轮超时分钟数，默认 60 */
@@ -214,8 +236,10 @@ export interface RulesConfig {
 ```
 
 **规则配置静态校验与默认值契约（`protocol/rules-schema.ts` & `protocol/validate.ts`）**：
+
 - **默认安全红线（`DEFAULT_ASK_FIRST`）**：当用户在 `rules.json` 中省略 `askFirst` 字段时，`parseRulesConfig()` 自动填充 7 类默认高危红线：`["rm -rf", "git push --force", "git reset --hard", "删除数据库", "对外发送消息", "修改密钥或权限", "产生实质费用"]`（显式传入数组时按用户配置生效）。
 - **同并发组有效 `parallel` 一致性**：共享同一 `group`（`rule.group ?? rule.name`）的所有规则，其有效并发度 `rule.parallel ?? 1` 必须严格一致；若同组内两条规则出现不同有效 `parallel` 值，静态校验立即抛 `ProtocolInputError` 拒收，消除组配额歧义。
+- **多引擎 `command` 与 `target` 静态分流校验**：`AgentProfile.command` 在 `runner` 为 `"command"` 或 `"acp"` 时必填非空字符串数组，在 `"codex"`、`"claude"`、`"herdr"` 时可选，在 `"agy-print"`、`"agentapi-ui"`、`"delivery"` 时严禁提供；`AgentProfile.target` 仅允许在 `runner === "herdr"` 时配置（非空无控制字符，最长 200 字符）。
 - **外部与回执链接协议收窄**：`InboundEvent.link`（含 `receipt.events[].link`）通过 `validateSafeUrl` 仅允许纯可见 ASCII 的 `http://` 或 `https://` 完整 URL（含非空主机名，最长 500 字符），一律拒收 `file://`、`javascript:` 或本地文件路径。
 
 ### 4.3 派单任务包（`Job`）与原子回执（`Receipt` & `RunResult`）
@@ -232,7 +256,9 @@ export interface Job {
   session: string | null;
   askFirst: string[];
   context: {
-    events: Array<InboundEvent & { source: string; sourceName: string; receivedAt: string }>;
+    events: Array<
+      InboundEvent & { source: string; sourceName: string; receivedAt: string }
+    >;
     answers: Array<{
       card: number;
       key: string;
@@ -245,9 +271,21 @@ export interface Job {
     }>;
     timers: Array<{ key: string; about: string; at: string }>;
     waiting: Array<{ key: string; about: string; at: string }>;
-    open: Array<{ card: number; key: string; title: string; text: string; at: string }>;
+    open: Array<{
+      card: number;
+      key: string;
+      title: string;
+      text: string;
+      at: string;
+    }>;
     /** 同 (rule, lane) 下 status 为 "decided" | "done" 的历史已决卡片（自动排除当轮 answers 中的卡片 ID） */
-    decided: Array<{ card: number; key: string; title: string; choice: string; at: string }>;
+    decided: Array<{
+      card: number;
+      key: string;
+      title: string;
+      choice: string;
+      at: string;
+    }>;
   };
 }
 
@@ -293,8 +331,9 @@ export interface RunResult extends Receipt {
 ```
 
 **回执与首行解析契约（`protocol/receipt.ts`）**：
+
 - **首行 Markdown 装饰符剥离（`parseFirstLine`）**：识别首行结论前自动剥离前导块级标记（`#` 标题、`>` 引用、无序/有序列表前缀）与成对行内强调符（`**`、`__`、`~~`、`*`、`_`、单反引号），确保诸如 `**没跑成**：接口超时` 或 `### NOTHING: 无需变更` 仍被精准判定为 `failed` / `nothing` 而非误判为 `done`。
-- **自底向上逆向围栏扫描（`scanFencedBlocks`）**：从回复末尾向上逆向匹配闭合反引号围栏（优先精确反引号个数匹配，兼容外层 4 反引号示例），使正文中未闭合的代码块示例绝不会吞掉最末尾合法闭合的 ```` ```agent-autoloop ```` 回执，同时仍能准确捕获末尾未闭合的残缺 `agent-autoloop` 围栏并返回明确 `problem`。
+- **自底向上逆向围栏扫描（`scanFencedBlocks`）**：从回复末尾向上逆向匹配闭合反引号围栏（优先精确反引号个数匹配，兼容外层 4 反引号示例），使正文中未闭合的代码块示例绝不会吞掉最末尾合法闭合的 ` ```agent-autoloop ` 回执，同时仍能准确捕获末尾未闭合的残缺 `agent-autoloop` 围栏并返回明确 `problem`。
 - **续接会话重读最新 Skill 提醒**：当 `job.session` 非空时，`promptFor()` 自动注入续接会话提醒，强制模型重新阅读最新 `SKILL.md` 规范而非仅凭历史对话记忆行事。
 
 ---
@@ -302,10 +341,12 @@ export interface RunResult extends Receipt {
 ## 5. 内核状态机、跨进程存储与不变量（State Machines, Store & Invariants）
 
 ### 5.1 单事务账本与跨进程增量同步（`kernel/store.ts`）
+
 - **双提交原语**：除确定性批量写入 `commit(facts)` 外，`Store` 提供 `commitLatest(decideFn)`——在 `BEGIN IMMEDIATE` 排他写事务内先读取 `facts WHERE seq > view.seq` 的全部分支外部增量（如 CLI 或离线 MCP 进程直写 `hub.db` 的事实），在克隆草稿 `view.fork()` 上追平投影与高水位后再执行 `decideFn(baseView.fork())`。
 - **异常回滚零内存脏写**：只有 SQLite `COMMIT` 落盘成功后才将外部增量与新 `Fact` 应用回宿主常驻内存 `view`；若事务冲突或 `decideFn` 抛错回滚（外部已有增量仍会安全同步至投影并提交），主内存 `view` 绝不残留任何未提交脏状态。`openStore` 重建 SQL 视图（`DROP VIEW` / `CREATE VIEW`）全程位于 `IMMEDIATE` 事务内，消除跨连接锁竞争。
 
 ### 5.2 轮次（`runs`）状态流转、并发互斥与退避预警
+
 - `queued` → `claimed`（Worker 领取并生成专属 `token`，锁定规则与模型快照）：
   - `canClaimRun` 强制执行 **同 `(grp, lane)` 跨规则单活互斥**（共享同一 `group` 的不同规则在同一 `lane` 上绝不同时运行两轮），并依次校验规则未处于 `pause`、全局 Worker `capacity`、同组有效并发度 `rule.parallel ?? 1`、单规则 `maxActive` 与单 Agent `maxActive`。
 - `claimed` → `done` | `nothing` | `cancelled`（终态不可逆）
@@ -317,6 +358,7 @@ export interface RunResult extends Receipt {
 - **铁律**：当用户点击 `stop`（记录 `cancel_at`）后，即使子进程退出上报 `failed`，内核也必须强制归入 `cancelled`，绝不重排重试。
 
 ### 5.3 决策卡片（`cards`）状态流转与通知策略
+
 - **提问卡（`kind: "ask"`）**：
   - `open` → `decided`（用户在面板或 MCP 提交回答，原子生成一条 `answer_event` 入队唤醒原事项）
   - `decided` → `done`（续办轮次成功执行完毕提交 `done` / `nothing` 回执；`jobOf` 构造后续同 `(rule, lane)` 轮次的 `context.decided` 时同时纳入 `"decided" | "done"` 状态并剔除当轮 `context.answers` 已含卡片，确保跨轮复查与长流水线持久保留历史授权 `approvedKeys`）
@@ -330,32 +372,40 @@ export interface RunResult extends Receipt {
 
 ---
 
-## 6. Antigravity 原生执行器、安全硬钩子与增量交付契约
+## 6. 八模全通道执行引擎、安全硬钩子与跨厂商增量交付契约
 
-### 6.1 执行编排与 `agy-print` 运行契约（`engine/`）
-启动业务子进程时，`engine/agy-runner.ts`（以及 `agentapi-runner.ts`、`command-runner.ts`）与 `engine/supervisor.ts` 必须执行以下隔离与容错契约：
+### 6.1 八模执行编排与各 Runner 运行契约（`engine/`）
+
+启动任何业务子进程时，`engine/{agy,agentapi,codex,claude,acp,herdr,command}-runner.ts` 与 `engine/supervisor.ts` 必须统一执行以下隔离与容错契约：
+
 1. **全量剥离控制面凭据**：从子进程 `env` 中剔除 `AUTOLOOP_OWNER_TOKEN`、`AUTOLOOP_INGEST_TOKEN`、`AUTOLOOP_MASTER_KEY`、`ANTIGRAVITY_SIDECAR*` 以及所有匹配 `AUTOLOOP_*_{TOKEN,SECRET,KEY,PASSWORD}` 的敏感变量，防止受控业务 Agent 越权自批卡片或篡改中台。
 2. **注入运行护栏上下文**：
    - `AUTOLOOP_RUN_ID="<run>"`
    - `AUTOLOOP_CONTEXT="<AUTOLOOP_HOME>/runs/<run>-<attempt>/context.json"`
    - `AUTOLOOP_GUARD_FILE="<AUTOLOOP_HOME>/runs/<run>-<attempt>/guard.json"`
-3. **构造 `agy` 命令参数数组**（使用 `spawn("agy", args, { cwd, detached: true, shell: false })`，严禁 `shell: true`）：
-   - 基础参数：`["--output-format", "stream-json", ..., "--print", prompt]`
-   - 模型与推理深度：若配置了 `model` 加 `["--model", agent.model]`；若配置了 `effort` 加 `["--effort", agent.effort]`
-   - 续接原会话：若 `job.session` 非空，加 `["--conversation", job.session]`
-   - 权限档位映射：
-     - `access === "read"` → `["--mode", "plan", "--sandbox"]`
-     - `access === "edit"`（默认）→ `["--mode", "accept-edits", "--sandbox"]`
-     - `access === "full"` → `["--mode", "auto"]`
-4. **流式 `result` 后 `30s` 退出宽限回收（`postResultGraceMs`）**：当 `agy-runner.ts` 已从 NDJSON 流收到非错误的最终 `result` 事件后，立即启动默认 `30s` 宽限计时器；若后台残留孙进程仍持有 `stdout`/`stderr` 管道未退出，宽限期满后主动向进程组发送 `SIGTERM`→`SIGKILL` 回收并按已收到的成功结果结算，防止白挂满 60 分钟造成假超时重试。
-5. **坏历史会话自动降级与延迟 `session` 补报（`supervisor.ts`）**：
-   - 当携带非空 `job.session` 启动但尚未收到任何启动确认帧即非零退出（`!started && !cancelled && !timedOut && exitCode !== 0`）时，自动降级清空 `session: null` 开启全新会话重跑本轮；若降级后仍未启动则绝不向内核误报空或失效会话，若降级启动成功但未返回新会话 ID 则显式提交 `session: null` 清除坏历史引用。
-   - 若执行器先通过 `init`/`assistant` 事件触发 `markStarted(session: null)`，随后在后续流事件中提取到真实 `conversationId`，`supervisor.ts` 自动二次调用 `markStarted` 补报该 `session`。
-6. **回执二次原地修复与 `discardReceipt` 安全降级结案（`supervisor.ts`）**：
+3. **Antigravity 原生执行器（`agy-runner.ts` & `agentapi-runner.ts`）**：
+   - 使用 `spawn("agy", args, { cwd, detached: true, shell: false })`（严禁 `shell: true`）；
+   - 基础参数：`["--output-format", "stream-json", ..., "--print", prompt]`，支持 `--model`、`--effort` 与 `--conversation <session>` 续接；
+   - 权限档位映射：`read` → `["--mode", "plan", "--sandbox"]`，`edit`（默认）→ `["--mode", "accept-edits", "--sandbox"]`，`full` → `["--mode", "auto"]`；
+   - `agentapi-runner.ts` 调用客户端 `new-conversation` / `send-message` 并监听 transcript 完结。
+4. **外部原生流式双执行器（`codex-runner.ts` & `claude-runner.ts`）**：
+   - **`codex-runner.ts`**：调用 `agent.command ?? ["codex"]` 执行 `exec --json`（续接时为 `exec resume <thread_id> --json`）；`access` 严格映射至原生内核沙箱（`read` → `--sandbox read-only`，`edit` → `--sandbox workspace-write`，`full` → `--sandbox danger-full-access`），`effort` 映射为 `-c model_reasoning_effort=<level>`，从 JSONL 事件流提取 `thread.started.thread_id`、助手消息与 `turn.completed.usage`。
+   - **`claude-runner.ts`**：调用 `agent.command ?? ["claude"]`（无缝兼容 `["zcode"]`、`["dsh"]` 等兼容 CLI）执行 `-p --verbose --output-format stream-json`（续接时加 `--resume <session_id>`），按 `access` 档位约束工具与权限模式，提取 `session_id`、最终回复与成本统计。
+5. **通用 `acp` 万能协议执行器（`acp-runner.ts`）**：
+   - 通过 `spawn(command[0], command.slice(1), { shell: false })` 启动任意兼容 Agent Client Protocol 的子进程（如 `["opencode", "acp"]`、Gemini CLI、Qwen Code、Goose、Kimi CLI），经 stdio NDJSON JSON-RPC 2.0 依次执行 `initialize` → `session/load`（无历史会话或不支持时回退 `session/new`）→ `session/prompt`；
+   - **协议层 `session/request_permission` 硬门禁**：在 JSON-RPC 回调层实时审计工具权限请求——凡触碰三层控制面密级文件（`guard.json` / `*.token` / `master.key` / `ipc.json` / `hub.db*` 写操作）、违反 `access === "read"` 只读限制，或命中未获 `approvedKeys` 授权的 `askFirst` 高危命令，一律返回 `reject_once`（无拒绝项时取消）。
+6. **`herdr` 交互式常驻窗格/远程机器特种执行器（`herdr-runner.ts`）**：
+   - 调用 `agent.command ?? ["herdr"]`（支持 `["herdr", "--machine", "<host>"]` 跨机 SSH 调度），按 `agent.target` 解析目标窗格（精确 ID `"w3:p1"`、别名 `"reviewer"`、空闲类型匹配 `"kind:codex"` 或动态拉起 `"spawn:opencode"`）；
+   - **无损文件交接（File-Based Handoff）**：将完整任务提示词与 `context.json` 路径以 `0600` 权限写入运行目录私有指令文件，仅向交互窗格注入短读取指令与唯一完成哨兵，规避 tmux `send-keys` 长文本多行转义截断，随后轮询窗格空闲态并通过 `pane read` 屏幕回滚缓冲提取末尾 `agent-autoloop` 回执。
+7. **流式完结后 `30s` 退出宽限回收（`postResultGraceMs`）**：当流式执行器已收到非错误的最终完成帧（如 `agy` `result` 或 `codex` `turn.completed`）后，立即启动默认 `30s` 宽限计时器；若后台残留孙进程仍持有管道未退，期满后主动向进程组发送 `SIGTERM`→`SIGKILL` 回收并按已收到的成功结果结算。
+8. **坏历史会话自动降级与延迟 `session` 补报（`supervisor.ts`）**：
+   - 当携带非空 `job.session` 启动但尚未进入有效启动态即非零退出（`!started && !cancelled && !timedOut && exitCode !== 0`）时，自动降级清空 `session: null` 开启全新会话重跑本轮；若流首帧无会话 ID 而后续帧提取到真实会话标识，自动二次调用 `markStarted` 补报。
+9. **回执二次原地修复与 `discardReceipt` 安全降级结案（`supervisor.ts`）**：
    - 当 `exitCode === 0` 且 `parsed.problem !== null` 且存在可续接 `session` 时，最多在原会话发送 **2 次** `repairPrompt(problem)` 仅重写最后一条消息（累加各次 Token `usage`）。
    - 若首轮业务已完成（`exitCode === 0` 且首行结论为 `done` 或 `nothing`），但 2 次修复耗尽后回执仍存在格式/校验错误（或无可用 `session` 无法修复），必须执行 **`discardReceipt` 安全降级**：保留首轮 `done` / `nothing` 结论与摘要正常结案（当结论为 `done` 时自动附带一张标题为「回执格式损坏已忽略」的 `open` 告警通知卡），**严禁将其标为 `failed` 触发最多 10 次整轮重跑导致业务副作用重复执行**。
 
 ### 6.2 `hooks.json` 生命周期硬钩子与否定批复防误授权限契约
+
 1. **`PreToolUse`（`hooks/pre-tool-guard.mjs`）**：
    - 当 `process.env.AUTOLOOP_GUARD_FILE` 未设置或文件不存在时零干扰放行 `"allow"`；一旦该变量指向的文件存在但读取/JSON 解析失败，一律按 **fail-closed** 返回 `"deny"`。
    - **三层控制面自保护**：
@@ -369,14 +419,16 @@ export interface RunResult extends Receipt {
    - `writeRunFiles()` 从 `context.answers` 与 `context.decided` 提取 `approvedKeys` 时，`isApprovedChoice()` 先剥离无害礼貌复合词（如“不错”“不用等”“毫不犹豫”“no problem”“don't hesitate”），再对任何含中英文否定、取消、暂缓、观望词（如“不”“别”“拒绝”“算了”“暂缓”“先看日志”“no”“don't”“wait”“hold”）或以问号（`?`/`？`）结尾的自由文本批复一律判定为**未授权**（且显式拒绝会覆盖同 `key` 早期授权），严防人类回复“不要删，先看日志”被误当作 `askFirst` 放行许可。
 3. **`Stop`（`hooks/stop-receipt-check.mjs`）**：
    - 当检测到 `process.env.AUTOLOOP_GUARD_FILE` 存在且 `terminationReason === "NO_TOOL_CALL"` 时激活。
-   - 读取 `transcriptPath` 最后一条模型回复，调用 `readMessage(content)`：若存在未闭合的 ```` ```agent-autoloop ```` 围栏或非法回执 JSON，返回 `{"decision":"continue","reason": repairPrompt(problem)}` 让模型在同一回合内立即订正（最多拦截 2 次，防死循环）。
+   - 读取 `transcriptPath` 最后一条模型回复，调用 `readMessage(content)`：若存在未闭合的 ` ```agent-autoloop ` 围栏或非法回执 JSON，返回 `{"decision":"continue","reason": repairPrompt(problem)}` 让模型在同一回合内立即订正（最多拦截 2 次，防死循环）。
 
-### 6.3 本地异构两级增量审查交付契约（`delivery/`）
-1. **裸对象安全快照与增量补丁提取（`delivery/snapshot.ts`）**：
+### 6.3 跨厂商异构两级增量审查交付契约（`delivery/`）
+
+1. **裸对象安全快照、跨厂商审查配置校验与增量补丁提取（`delivery/snapshot.ts`）**：
    - 始终通过 `git ls-tree` / `git show` 仅从受信任基线分支（如 `main`）读取 `.autoloop/delivery.json` 与 `AGENTS.md`（符号链接 `120000` 一律拒读），绝不检出待审分支工作树或执行不可信分支钩子；全量补丁 `diff.patch` 以 `0600` 权限原子落盘。
+   - `parseDeliveryConfig()` 支持并严格校验可选跨厂商审查字段：`reviewerRunner?: "agy-print" | "codex" | "claude" | "acp"`（省略时默认按 `"agy-print"` 处理，100% 向后兼容）与 `reviewerCommand?: string[]`（当 `reviewerRunner === "acp"` 时必填非空无控制字符字符串数组，为 `"codex"` / `"claude"` 时可选自定义前缀，为 `"agy-print"` 或省略时严禁配置）。
    - 第 2 轮起若传入上轮已审 `previousReviewedSha`，`extractIncrementalDiff()` 校验其与 `headSha` 不同、满足 `git merge-base --is-ancestor prevSha headSha` 且同属当前 `mergeBaseSha` 谱系后，生成 `prevSha..headSha` 的 `0600` 权限 `incremental-diff.patch`；若上一轮存在代码级阻塞缺陷但本轮增量仅修改了 `*.md` 文档（`docs_only`），或分支发生 rebase 改写历史（`not_ancestor` / `merge_base_drift`），自动清理增量补丁并安全回退至完整分支 `diff.patch`。
-2. **异构模型路由、轮次上限与跨分支名 SHA 缓存（`delivery/reviewer.ts`）**：
-   - 作者模型含 `hydrogen` 默认派给 `gemini-4-carbon-high`，含 `carbon`/`claude`/`opus`/`sonnet` 或未指定默认派给 `gemini-4-hydrogen-xhigh`（支持 `delivery.json` 的 `reviewerModels` 覆盖），以无状态 `--mode plan --sandbox`（不传 `--conversation`、临时独立 `access: "read"` `guard.json`）运行，单轮默认超时 **`30` 分钟**（`DEFAULT_REVIEW_TIMEOUT_MS`）。
+2. **同端/跨厂商异构模型路由、轮次上限与跨分支名 SHA 缓存（`delivery/reviewer.ts`）**：
+   - 作者模型含 `hydrogen` 默认派给 `gemini-4-carbon-high`，含 `carbon`/`claude`/`opus`/`sonnet` 或未指定默认派给 `gemini-4-hydrogen-xhigh`（支持 `delivery.json` 的 `reviewerModels` 与 `reviewerRunner` 覆盖为 OpenAI `codex` / `claude` / `opencode acp` 跨厂商只读盲审），始终以无状态只读沙箱（`access: "read"`，不续接历史会话）运行，单轮默认超时 **`30` 分钟**（`DEFAULT_REVIEW_TIMEOUT_MS`）。
    - 审查账本按 **`(headSha, mergeBaseSha, reviewerModel)`** 匹配幂等缓存（与分支名解耦，重命名分支绝不重审同一提交）；默认最大审查轮次 **`DEFAULT_MAX_REVIEW_ROUNDS = 2`**，第 2 轮仍有 `blocking` 发现或超出上限时状态置为 `escalated_to_human`，由 `pipeline.ts` 自动转为人工 `ask` 批奏折卡片。
    - **定向增量复审与防拉锯纪律**：第 2 轮起自动附带第 1 轮未决 `blockingFindings`（`file`、`line`、`title`、`detail`、`how`），要求逐条核实修复情况并检查新改动是否引入新缺陷，**严禁在未触碰的历史代码中翻找新边角问题拉锯**。
    - **两级发现与测试分节轻读**：每条 `blocking` 缺陷必须写明当前调用链下的具体触发路径（`detail` / `how`），同类成因归并为单条，`warning` / `info` 不阻断合并；普通测试文件（`tests/*.test.ts`）归入分节轻读（只查行为覆盖不挑风格），而安全与纯洁性门禁测试（`tests/purity.test.ts`、`tests/security-isolation.test.ts` 等及命中 `sensitivePaths` 的测试）维持严审防门禁弱化。
@@ -386,6 +438,7 @@ export interface RunResult extends Receipt {
 ## 7. 本地通信接口规范（Sidecar Web API & MCP 工具集）
 
 ### 7.1 Sidecar 辅助面板 API（供 `sidecars/hub/web/app.js` 调用，自动受 `SidecarApp` UI Token 保护）
+
 - `GET /`：返回批奏折工作台主页面 HTML。
 - `GET /api/state?etag=<etag>&before=<runId>`：返回全量/增量状态快照（`cards`、`recentCards`、`lines`、`runs`、`timers`、`pauses`、`skipped`、`spending`、`etag`）。
 - `GET /api/why?run=<runId>`：返回指定轮次的完整因果链（规则版本、输入事件、领取时间、模型、Token 消耗、回执明细、关联会话 ID）。
@@ -395,6 +448,7 @@ export interface RunResult extends Receipt {
 - `POST /api/rules/pause` / `POST /api/rules/resume` / `POST /api/rules/replay` / `POST /api/rules/run`：规则运行态管控。
 
 ### 7.2 `autoloop_hub` MCP 工具集（全部以 `autoloop_` 前缀命名，防全局命名冲突）
+
 - `autoloop_status`（只读）：查看待批奏折卡片、各流水线运行态与今日/近 7 日 Token 统计。
 - `autoloop_why`（只读）：查询某一轮的完整前因后果。
 - `autoloop_explain_rules`（只读）：校验并解释当前或草稿 `rules.json` 的路由与下次 Cron 触发时刻。
