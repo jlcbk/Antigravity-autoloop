@@ -939,7 +939,11 @@ describe("Antigravity Plugin Manifest, Rules, and SVG Logo", () => {
     assert.ok((manifest.displayName as string).length > 0);
     assert.equal(typeof manifest.description, "string");
     assert.ok((manifest.description as string).length > 0);
-    assert.equal(manifest.version, "1.0.0");
+    const pkg = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"),
+    ) as { version: string };
+    assert.match(String(manifest.version), /^\d+\.\d+\.\d+$/);
+    assert.equal(manifest.version, pkg.version);
     assert.equal(manifest.logo, "assets/logo.svg");
     assert.ok(Array.isArray(manifest.suggestedPrompts));
     assert.equal((manifest.suggestedPrompts as unknown[]).length, 3);
