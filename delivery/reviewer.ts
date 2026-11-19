@@ -16,7 +16,10 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runAgyPrint } from "../engine/agy-runner.ts";
+import { runAcpAgent } from "../engine/acp-runner.ts";
+import { runAgyPrint, type RunnerExecution } from "../engine/agy-runner.ts";
+import { runClaudePrint } from "../engine/claude-runner.ts";
+import { runCodexExec } from "../engine/codex-runner.ts";
 import { expandHomePath } from "../engine/context-file.ts";
 import type { Job } from "../protocol/types.ts";
 import { isPlainObject } from "../protocol/validate.ts";
@@ -26,6 +29,7 @@ import {
   isMarkdownOnlyChanges,
   type BranchSnapshot,
   type IncrementalFallbackReason,
+  type ReviewerRunnerKind,
 } from "./snapshot.ts";
 
 export type ReviewSeverity = "blocking" | "warning" | "info";
@@ -88,9 +92,15 @@ export interface ReviewBranchSnapshotOptions {
   authorModel?: string;
   reviewerModelOverride?: string;
   agyBin?: string;
+  codexBin?: string;
+  claudeBin?: string;
+  postResultGraceMs?: number;
   baseEnv?: NodeJS.ProcessEnv;
   timeoutMs?: number;
+  signal?: AbortSignal;
 }
+
+export type ReviewBranchOptions = ReviewBranchSnapshotOptions;
 
 export interface BuildReviewPromptOptions {
   previousBlockingFindings?: readonly BlockingFinding[];
@@ -201,6 +211,60 @@ function normalizeMaxReviewRounds(raw?: number): number {
     throw new Error(`Invalid maxReviewRounds: ${raw}`);
   }
   return raw;
+}
+
+function lookupExplicitReviewerModel(
+  authorModel?: string,
+  customMap?: Record<string, string>,
+): string | undefined {
+  if (!customMap || !isPlainObject(customMap)) {
+    return undefined;
+  }
+
+  const trimmedAuthor = authorModel?.trim() ?? "";
+  const normalized = trimmedAuthor.toLowerCase();
+
+  if (trimmedAuthor.length > 0) {
+    const exactDirect = customMap[trimmedAuthor];
+    if (typeof exactDirect === "string" && exactDirect.trim().length > 0) {
+      return exactDirect.trim();
+    }
+
+    for (const [key, value] of Object.entries(customMap)) {
+      if (
+        key.trim().toLowerCase() === normalized &&
+        typeof value === "string" &&
+        value.trim().length > 0
+      ) {
+        return value.trim();
+      }
+    }
+
+    const partialCandidates = Object.entries(customMap)
+      .filter(([key, value]) => {
+        const k = key.trim().toLowerCase();
+        return (
+          k.length > 0 &&
+          k !== "default" &&
+          k !== "*" &&
+          typeof value === "string" &&
+          value.trim().length > 0 &&
+          normalized.includes(k)
+        );
+      })
+      .sort((a, b) => b[0].trim().length - a[0].trim().length);
+
+    if (partialCandidates.length > 0) {
+      return partialCandidates[0]![1].trim();
+    }
+  }
+
+  const fallback = customMap.default ?? customMap["*"];
+  if (typeof fallback === "string" && fallback.trim().length > 0) {
+    return fallback.trim();
+  }
+
+  return undefined;
 }
 
 /**
@@ -714,9 +778,7 @@ export function buildReviewPrompt(
       lines.push(
         "1. ① 逐条核对上一轮阻塞问题是否真正修复：若已彻底修复则不再重复报告；若未修复或修复不完整，继续标记为 `blocking` 并写明当前仍可触发的具体路径。",
       );
-      lines.push(
-        "2. ② 检查修复代码及本轮新增无关代码是否引入新的阻塞级缺陷。",
-      );
+      lines.push("2. ② 检查修复代码及本轮新增无关代码是否引入新的阻塞级缺陷。");
       lines.push(
         "3. ③ **严禁在未改动的历史代码中翻找新边角问题拉锯**：上轮未报且本轮未触碰的历史代码禁止追加新挑刺。",
       );
@@ -992,8 +1054,12 @@ export async function reviewBranchSnapshot(
     authorModel,
     reviewerModelOverride,
     agyBin,
+    codexBin,
+    claudeBin,
+    postResultGraceMs,
     baseEnv = process.env,
     timeoutMs = DEFAULT_REVIEW_TIMEOUT_MS,
+    signal,
   } = options;
 
   const resolvedLedgerFile = path.resolve(expandHomePath(ledgerFile));
@@ -1002,19 +1068,54 @@ export async function reviewBranchSnapshot(
   );
   const ledger = readReviewLedger(resolvedLedgerFile);
 
-  const reviewerModel =
-    reviewerModelOverride?.trim() ||
-    selectHeterogeneousReviewerModel(
-      authorModel,
-      snapshot.config.reviewerModels,
-    );
+  const reviewerRunner: ReviewerRunnerKind =
+    snapshot.config.reviewerRunner ?? "agy-print";
+  const reviewerCommand =
+    reviewerRunner === "agy-print"
+      ? undefined
+      : snapshot.config.reviewerCommand &&
+          snapshot.config.reviewerCommand.length > 0
+        ? [...snapshot.config.reviewerCommand]
+        : undefined;
 
-  // 1. Branch-decoupled SHA idempotency (#311): match by (headSha, mergeBaseSha, reviewerModel).
+  if (reviewerRunner === "acp" && !reviewerCommand) {
+    throw new Error(
+      'delivery.reviewerCommand is required when delivery.reviewerRunner is "acp"',
+    );
+  }
+
+  const rawSingularModel = (snapshot.config as { reviewerModel?: unknown })
+    .reviewerModel;
+  const configuredSingularModel =
+    typeof rawSingularModel === "string" && rawSingularModel.trim().length > 0
+      ? rawSingularModel.trim()
+      : undefined;
+
+  let selectedModel: string | undefined;
+  let reviewerKey: string;
+  if (reviewerRunner === "agy-print") {
+    selectedModel =
+      reviewerModelOverride?.trim() ||
+      configuredSingularModel ||
+      selectHeterogeneousReviewerModel(
+        authorModel,
+        snapshot.config.reviewerModels,
+      );
+    reviewerKey = selectedModel;
+  } else {
+    selectedModel =
+      reviewerModelOverride?.trim() ||
+      configuredSingularModel ||
+      lookupExplicitReviewerModel(authorModel, snapshot.config.reviewerModels);
+    reviewerKey = `${reviewerRunner}:${selectedModel || (reviewerCommand ? reviewerCommand.join(" ") : "default")}`;
+  }
+
+  // 1. Branch-decoupled SHA idempotency (#311): match by (headSha, mergeBaseSha, reviewerKey).
   const cachedEntry = ledger.entries.find(
     (entry) =>
       entry.headSha === snapshot.headSha &&
       entry.mergeBaseSha === snapshot.mergeBaseSha &&
-      (!entry.reviewerModel || entry.reviewerModel === reviewerModel),
+      (!entry.reviewerModel || entry.reviewerModel === reviewerKey),
   );
   if (cachedEntry) {
     return outcomeFromEntry(cachedEntry, true);
@@ -1029,17 +1130,23 @@ export async function reviewBranchSnapshot(
   const existingSameShaOnBranch = branchEntries.find(
     (entry) => entry.headSha === snapshot.headSha,
   );
-  const distinctPriorShas = new Set(branchEntries.map((entry) => entry.headSha));
+  const distinctPriorShas = new Set(
+    branchEntries.map((entry) => entry.headSha),
+  );
   const nextRound = existingSameShaOnBranch
     ? existingSameShaOnBranch.round
     : distinctPriorShas.size + 1;
   const lastEntry =
-    branchEntries.length > 0 ? branchEntries[branchEntries.length - 1] : undefined;
+    branchEntries.length > 0
+      ? branchEntries[branchEntries.length - 1]
+      : undefined;
 
   // 2. Round cap guard: never exceed configured maxReviewRounds (default 2).
   if (nextRound > maxReviewRounds) {
     const carriedFindings = lastEntry ? cloneFindings(lastEntry.findings) : [];
-    const carriedBlocking = lastEntry ? getEntryBlockingFindings(lastEntry) : [];
+    const carriedBlocking = lastEntry
+      ? getEntryBlockingFindings(lastEntry)
+      : [];
     const entry: ReviewLedgerEntry = {
       targetRef: snapshot.targetRef,
       baseBranch: snapshot.baseBranch,
@@ -1047,7 +1154,7 @@ export async function reviewBranchSnapshot(
       mergeBaseSha: snapshot.mergeBaseSha,
       round: nextRound,
       status: "escalated_to_human",
-      reviewerModel,
+      reviewerModel: reviewerKey,
       ...(authorModel ? { authorModel } : {}),
       findings: carriedFindings,
       blockingFindings: carriedBlocking,
@@ -1126,10 +1233,10 @@ export async function reviewBranchSnapshot(
 
   const useIncrementalDiff = Boolean(
     nextRound >= 2 &&
-      priorBlocking.length > 0 &&
-      effectiveSnapshot.incrementalDiffFile &&
-      existsSync(effectiveSnapshot.incrementalDiffFile) &&
-      effectiveSnapshot.incrementalFallbackReason !== "docs_only",
+    priorBlocking.length > 0 &&
+    effectiveSnapshot.incrementalDiffFile &&
+    existsSync(effectiveSnapshot.incrementalDiffFile) &&
+    effectiveSnapshot.incrementalFallbackReason !== "docs_only",
   );
   const activeContextDiffFile = useIncrementalDiff
     ? effectiveSnapshot.incrementalDiffFile!
@@ -1142,7 +1249,7 @@ export async function reviewBranchSnapshot(
   chmodSync(guardDir, 0o700);
   const guardFile = path.join(guardDir, "guard.json");
 
-  let execution;
+  let execution: RunnerExecution;
   try {
     writePrivateJson(guardFile, {
       run: 0,
@@ -1165,9 +1272,10 @@ export async function reviewBranchSnapshot(
       agent: {
         id: "delivery-reviewer",
         name: "delivery-reviewer",
-        runner: "agy-print",
-        model: reviewerModel,
+        runner: reviewerRunner,
+        ...(selectedModel !== undefined ? { model: selectedModel } : {}),
         access: "read",
+        ...(reviewerCommand !== undefined ? { command: reviewerCommand } : {}),
       },
       session: null,
       askFirst: [],
@@ -1190,15 +1298,66 @@ export async function reviewBranchSnapshot(
         previousReviewedSha: lastEntry?.headSha,
       },
     );
-    execution = await runAgyPrint({
-      job,
-      contextFile: activeContextDiffFile,
-      guardFile,
-      promptOverride: prompt,
-      agyBin,
-      baseEnv,
-      timeoutMs,
-    });
+
+    switch (reviewerRunner) {
+      case "agy-print":
+        execution = await runAgyPrint({
+          job,
+          contextFile: activeContextDiffFile,
+          guardFile,
+          promptOverride: prompt,
+          agyBin,
+          postResultGraceMs,
+          baseEnv,
+          timeoutMs,
+          signal,
+        });
+        break;
+      case "codex":
+        execution = await runCodexExec({
+          job,
+          contextFile: activeContextDiffFile,
+          guardFile,
+          promptOverride: prompt,
+          codexBin,
+          postResultGraceMs,
+          baseEnv,
+          timeoutMs,
+          signal,
+        });
+        break;
+      case "claude":
+        execution = await runClaudePrint({
+          job,
+          contextFile: activeContextDiffFile,
+          guardFile,
+          promptOverride: prompt,
+          claudeBin,
+          postResultGraceMs,
+          baseEnv,
+          timeoutMs,
+          signal,
+        });
+        break;
+      case "acp":
+        execution = await runAcpAgent({
+          job,
+          contextFile: activeContextDiffFile,
+          guardFile,
+          promptOverride: prompt,
+          postResultGraceMs,
+          baseEnv,
+          timeoutMs,
+          signal,
+        });
+        break;
+      default: {
+        const unknownReviewer: never = reviewerRunner;
+        throw new Error(
+          `Unsupported reviewerRunner: ${String(unknownReviewer)}`,
+        );
+      }
+    }
   } finally {
     rmSync(guardDir, { recursive: true, force: true });
   }
@@ -1239,7 +1398,7 @@ export async function reviewBranchSnapshot(
     mergeBaseSha: snapshot.mergeBaseSha,
     round: nextRound,
     status,
-    reviewerModel,
+    reviewerModel: reviewerKey,
     ...(authorModel ? { authorModel } : {}),
     findings: cloneFindings(parsed.findings),
     blockingFindings,

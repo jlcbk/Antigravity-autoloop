@@ -69,7 +69,10 @@ export interface DeliveryPipelineOptions {
   authorModel?: string;
   reviewerModelOverride?: string;
   agyBin?: string;
+  codexBin?: string;
+  claudeBin?: string;
   ghBin?: string;
+  postResultGraceMs?: number;
   baseEnv?: NodeJS.ProcessEnv;
   reviewTimeoutMs?: number;
   checkTimeoutMs?: number;
@@ -111,7 +114,10 @@ export interface DeliveryRunnerDefaults {
   authorModel?: string;
   reviewerModelOverride?: string;
   agyBin?: string;
+  codexBin?: string;
+  claudeBin?: string;
   ghBin?: string;
+  postResultGraceMs?: number;
   reviewTimeoutMs?: number;
   checkTimeoutMs?: number;
   smokeTimeoutMs?: number;
@@ -1254,15 +1260,27 @@ export async function runDeliveryPipeline(
       headSha: snapshot.headSha,
     });
 
-    const review = await reviewBranchSnapshot({
-      snapshot,
-      ledgerFile,
-      authorModel: options.authorModel,
-      reviewerModelOverride: options.reviewerModelOverride,
-      agyBin: options.agyBin,
-      baseEnv,
-      timeoutMs: options.reviewTimeoutMs,
-    });
+    let review: ReviewOutcome;
+    try {
+      review = await reviewBranchSnapshot({
+        snapshot,
+        ledgerFile,
+        authorModel: options.authorModel,
+        reviewerModelOverride: options.reviewerModelOverride,
+        agyBin: options.agyBin,
+        codexBin: options.codexBin,
+        claudeBin: options.claudeBin,
+        postResultGraceMs: options.postResultGraceMs,
+        baseEnv,
+        timeoutMs: options.reviewTimeoutMs,
+        signal: options.signal,
+      });
+    } catch (err) {
+      if (options.signal?.aborted) {
+        return cancelledResult("review", snapshot);
+      }
+      throw err;
+    }
 
     if (options.signal?.aborted) {
       return cancelledResult("review", snapshot, review);
@@ -2070,7 +2088,10 @@ export function createDeliveryRunner(
         authorModel,
         reviewerModelOverride: defaults.reviewerModelOverride,
         agyBin: defaults.agyBin,
+        codexBin: defaults.codexBin,
+        claudeBin: defaults.claudeBin,
         ghBin: defaults.ghBin,
+        postResultGraceMs: defaults.postResultGraceMs,
         baseEnv: ctx.baseEnv,
         reviewTimeoutMs: defaults.reviewTimeoutMs ?? runTimeoutMs,
         checkTimeoutMs: defaults.checkTimeoutMs ?? runTimeoutMs,

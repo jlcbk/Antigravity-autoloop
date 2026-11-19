@@ -138,8 +138,12 @@ export interface HubRuntimeOptions {
   pollIntervalMs?: number;
   heartbeatIntervalMs?: number;
   killGraceMs?: number;
+  postResultGraceMs?: number;
   agyBin?: string;
   agentApiBin?: string;
+  codexBin?: string;
+  claudeBin?: string;
+  herdrBin?: string;
   appDataDir?: string;
   baseEnv?: NodeJS.ProcessEnv;
   deliveryRunner?: CustomRunnerHandler;
@@ -439,8 +443,12 @@ export class HubRuntime {
           pollIntervalMs: options.pollIntervalMs,
           heartbeatIntervalMs: options.heartbeatIntervalMs,
           killGraceMs: options.killGraceMs,
+          postResultGraceMs: options.postResultGraceMs,
           agyBin: options.agyBin,
           agentApiBin: options.agentApiBin,
+          codexBin: options.codexBin,
+          claudeBin: options.claudeBin,
+          herdrBin: options.herdrBin,
           appDataDir: options.appDataDir,
           baseEnv: options.baseEnv,
           deliveryRunner: options.deliveryRunner,

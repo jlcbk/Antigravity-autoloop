@@ -7,10 +7,14 @@
 import { randomUUID } from "node:crypto";
 import { repairPrompt } from "../protocol/receipt.ts";
 import type { Job, Receipt, RunResult, RunUsage } from "../protocol/types.ts";
+import { runAcpAgent } from "./acp-runner.ts";
 import { runAgentApiUi } from "./agentapi-runner.ts";
 import { runAgyPrint, type RunnerExecution } from "./agy-runner.ts";
+import { runClaudePrint } from "./claude-runner.ts";
+import { runCodexExec } from "./codex-runner.ts";
 import { runCommandProbe } from "./command-runner.ts";
 import { writeRunFiles } from "./context-file.ts";
+import { runHerdrAgent } from "./herdr-runner.ts";
 
 export type MaybePromise<T> = T | Promise<T>;
 
@@ -68,6 +72,9 @@ export interface SupervisorOptions {
   postResultGraceMs?: number;
   agyBin?: string;
   agentApiBin?: string;
+  codexBin?: string;
+  claudeBin?: string;
+  herdrBin?: string;
   appDataDir?: string;
   baseEnv?: NodeJS.ProcessEnv;
   deliveryRunner?: CustomRunnerHandler;
@@ -141,6 +148,26 @@ function attachReceiptFields(target: RunResult, receipt: Receipt): void {
 
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+function canRepairSession(runner: Job["agent"]["runner"]): boolean {
+  switch (runner) {
+    case "agy-print":
+    case "agentapi-ui":
+    case "codex":
+    case "claude":
+    case "acp":
+    case "herdr":
+      return true;
+    case "command":
+    case "delivery":
+      return false;
+    default: {
+      const unknownRunner: never = runner;
+      void unknownRunner;
+      return false;
+    }
+  }
 }
 
 /**
@@ -262,6 +289,56 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
               onStarted: handleStarted,
               signal: abortController.signal,
             });
+          case "codex":
+            return runCodexExec({
+              job: targetJob,
+              contextFile: files.contextFile,
+              guardFile: files.guardFile,
+              promptOverride,
+              codexBin: options.codexBin,
+              baseEnv: options.baseEnv,
+              killGraceMs: options.killGraceMs,
+              postResultGraceMs: options.postResultGraceMs,
+              onStarted: handleStarted,
+              signal: abortController.signal,
+            });
+          case "claude":
+            return runClaudePrint({
+              job: targetJob,
+              contextFile: files.contextFile,
+              guardFile: files.guardFile,
+              promptOverride,
+              claudeBin: options.claudeBin,
+              baseEnv: options.baseEnv,
+              killGraceMs: options.killGraceMs,
+              postResultGraceMs: options.postResultGraceMs,
+              onStarted: handleStarted,
+              signal: abortController.signal,
+            });
+          case "acp":
+            return runAcpAgent({
+              job: targetJob,
+              contextFile: files.contextFile,
+              guardFile: files.guardFile,
+              promptOverride,
+              baseEnv: options.baseEnv,
+              killGraceMs: options.killGraceMs,
+              postResultGraceMs: options.postResultGraceMs,
+              onStarted: handleStarted,
+              signal: abortController.signal,
+            });
+          case "herdr":
+            return runHerdrAgent({
+              job: targetJob,
+              contextFile: files.contextFile,
+              guardFile: files.guardFile,
+              promptOverride,
+              herdrBin: options.herdrBin,
+              baseEnv: options.baseEnv,
+              killGraceMs: options.killGraceMs,
+              onStarted: handleStarted,
+              signal: abortController.signal,
+            });
           case "command":
             return runCommandProbe({
               job: targetJob,
@@ -289,9 +366,8 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
             });
           }
           default: {
-            throw new Error(
-              `不支持的 Runner 类型: ${String(targetJob.agent.runner)}`,
-            );
+            const unknownRunner: never = targetJob.agent.runner;
+            throw new Error(`不支持的 Runner 类型: ${String(unknownRunner)}`);
           }
         }
       };
@@ -340,8 +416,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         (initialExec.parsed.outcome === "done" ||
           initialExec.parsed.outcome === "nothing");
 
-      const supportsRepair =
-        job.agent.runner === "agy-print" || job.agent.runner === "agentapi-ui";
+      const supportsRepair = canRepairSession(job.agent.runner);
 
       let repairAttempt = 0;
       while (
@@ -442,8 +517,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           exec.error ??
           "回执解析异常";
         const preservedOutcome = initialExec.parsed.outcome as
-          | "done"
-          | "nothing";
+          "done" | "nothing";
         const preservedSummary =
           initialExec.parsed.summary || exec.summary || "";
         result = {
