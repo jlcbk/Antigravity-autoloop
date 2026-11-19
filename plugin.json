@@ -2,7 +2,7 @@
   "name": "autoloop",
   "displayName": "Autoloop 批奏折自动化中台",
   "description": "将确定性事件调度内核、多模型自动化工作流、本地异构代码审查交付与批奏折工作台面板 100% 原生运行在 Antigravity 内。",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "repository": "https://github.com/jlcbk/Antigravity-autoloop",
   "logo": "assets/logo.svg",
   "suggestedPrompts": [
