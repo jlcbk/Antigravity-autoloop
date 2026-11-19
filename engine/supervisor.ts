@@ -121,6 +121,16 @@ function accumulateUsage(
   return hasAny ? merged : undefined;
 }
 
+function attachExposedSession(
+  target: RunResult,
+  exposedSession: string | null | undefined,
+): void {
+  if (exposedSession !== undefined) {
+    const mutableTarget: { session?: string | null } = target;
+    mutableTarget.session = exposedSession;
+  }
+}
+
 function attachReceiptFields(target: RunResult, receipt: Receipt): void {
   if (receipt.ask !== undefined) target.ask = receipt.ask;
   if (receipt.notice !== undefined) target.notice = receipt.notice;
@@ -364,14 +374,35 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         exec = repairedExec;
       }
 
+      if (anyStarted && !markedStarted) {
+        markedStarted = true;
+        lastMarkedSession = latestSession;
+        startPromise = startPromise
+          .then(async () => {
+            await options.backend.markStarted({
+              run: job.run,
+              token: job.token,
+              session: latestSession,
+            });
+          })
+          .catch((err) => {
+            options.onError?.(err);
+          });
+      }
+
       await startPromise;
 
       if (stopping && !entry.kernelCancelled) {
         return;
       }
 
-      const exposedSession =
-        anyStarted && latestSession !== null ? latestSession : undefined;
+      const exposedSession: string | null | undefined = !anyStarted
+        ? undefined
+        : latestSession !== null
+          ? latestSession
+          : downgradedFromStaleSession
+            ? null
+            : undefined;
 
       let result: RunResult;
       if (
@@ -383,7 +414,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           outcome: "cancelled",
           summary: "stopped by user",
         };
-        if (exposedSession !== undefined) result.session = exposedSession;
+        attachExposedSession(result, exposedSession);
         if (totalUsage !== undefined) result.usage = totalUsage;
       } else if (
         exec.exitCode === 0 &&
@@ -394,7 +425,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           outcome: exec.outcome,
         };
         if (exec.summary) result.summary = exec.summary;
-        if (exposedSession !== undefined) result.session = exposedSession;
+        attachExposedSession(result, exposedSession);
         if (totalUsage !== undefined) result.usage = totalUsage;
         if (exec.parsed.receipt) {
           attachReceiptFields(result, exec.parsed.receipt);
@@ -420,9 +451,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
         if (preservedSummary) {
           result.summary = preservedSummary;
         }
-        if (exposedSession !== undefined) {
-          result.session = exposedSession;
-        }
+        attachExposedSession(result, exposedSession);
         if (totalUsage !== undefined) {
           result.usage = totalUsage;
         }
@@ -444,7 +473,7 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           error: errMsg,
         };
         if (exec.summary) result.summary = exec.summary;
-        if (exposedSession !== undefined) result.session = exposedSession;
+        attachExposedSession(result, exposedSession);
         if (totalUsage !== undefined) result.usage = totalUsage;
       } else {
         result = {
@@ -452,17 +481,37 @@ export function createSupervisor(options: SupervisorOptions): Supervisor {
           error: exec.error ?? (exec.summary || "run failed"),
         };
         if (exec.summary) result.summary = exec.summary;
-        if (exposedSession !== undefined) result.session = exposedSession;
+        attachExposedSession(result, exposedSession);
         if (totalUsage !== undefined) result.usage = totalUsage;
       }
 
-      await Promise.resolve(
-        options.backend.submitResult({
-          run: job.run,
-          token: job.token,
-          result,
-        }),
-      );
+      try {
+        await Promise.resolve(
+          options.backend.submitResult({
+            run: job.run,
+            token: job.token,
+            result,
+          }),
+        );
+      } catch (submitErr) {
+        if (
+          exposedSession === null &&
+          submitErr instanceof Error &&
+          /RunResult\.session/.test(submitErr.message)
+        ) {
+          const compatResult: RunResult = { ...result };
+          delete (compatResult as { session?: string | null }).session;
+          await Promise.resolve(
+            options.backend.submitResult({
+              run: job.run,
+              token: job.token,
+              result: compatResult,
+            }),
+          );
+        } else {
+          throw submitErr;
+        }
+      }
       submitted = true;
     } catch (err) {
       options.onError?.(err);

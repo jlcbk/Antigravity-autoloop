@@ -1151,3 +1151,317 @@ describe("WP-B 5: unified runner env sanitization & command-runner bounded outpu
     assert.equal(res.parsed.receipt?.events?.[0]?.id, "spam-evt-1");
   });
 });
+
+describe("WP-B Verifier Round-1 Must-Fixes (2, 3, 4)", () => {
+  it("Must-Fix 2: unlocks DROP TABLE when askFirst default '删除数据库' is in approvedKeys", () => {
+    const tmpDir = makeTempDir();
+    const workCwd = path.join(tmpDir, "repo");
+    mkdirSync(workCwd, { recursive: true });
+    const guardFile = path.join(tmpDir, "runs", "1-1", "guard.json");
+    mkdirSync(path.dirname(guardFile), { recursive: true });
+
+    // Unapproved -> denied
+    writeFileSync(
+      guardFile,
+      JSON.stringify({
+        run: 1,
+        attempt: 1,
+        rule: "db-cleanup",
+        cwd: workCwd,
+        access: "edit",
+        askFirst: ["rm -rf", "git push --force", "git reset --hard", "删除数据库"],
+        approvedKeys: [],
+      }),
+      "utf8",
+    );
+    assert.equal(
+      runPreToolHook(
+        {
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: 'sqlite3 app.db "DROP TABLE old_cache"' },
+          },
+        },
+        { AUTOLOOP_GUARD_FILE: guardFile },
+      ).decision,
+      "deny",
+    );
+
+    // Approved with default Chinese key "删除数据库" -> allowed
+    writeFileSync(
+      guardFile,
+      JSON.stringify({
+        run: 1,
+        attempt: 2,
+        rule: "db-cleanup",
+        cwd: workCwd,
+        access: "edit",
+        askFirst: ["rm -rf", "git push --force", "git reset --hard", "删除数据库"],
+        approvedKeys: ["删除数据库"],
+      }),
+      "utf8",
+    );
+    assert.deepEqual(
+      runPreToolHook(
+        {
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: 'sqlite3 app.db "DROP TABLE old_cache"' },
+          },
+        },
+        { AUTOLOOP_GUARD_FILE: guardFile },
+      ),
+      { decision: "allow" },
+    );
+  });
+
+  it("Must-Fix 3: allows rich read-only commands on AUTOLOOP_CONTEXT / diff.patch / rules.json while blocking inline or shell writes to context.json & hub.db", () => {
+    const tmpDir = makeTempDir();
+    const autoloopHome = path.join(tmpDir, "autoloop_home");
+    const runDir = path.join(autoloopHome, "runs", "8-1");
+    const snapDir = path.join(tmpDir, "snap");
+    const workCwd = path.join(tmpDir, "repo");
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(snapDir, { recursive: true });
+    mkdirSync(workCwd, { recursive: true });
+
+    const guardFile = path.join(runDir, "guard.json");
+    const contextFile = path.join(runDir, "context.json");
+    const diffPatchFile = path.join(snapDir, "diff.patch");
+    const rulesFile = path.join(autoloopHome, "rules.json");
+    const hubDbFile = path.join(autoloopHome, "hub.db");
+
+    writeFileSync(contextFile, '{"events":[]}\n', "utf8");
+    writeFileSync(diffPatchFile, "--- a/x\n+++ b/x\n", "utf8");
+    writeFileSync(rulesFile, "{}\n", "utf8");
+    writeFileSync(hubDbFile, "sqlite3", "utf8");
+
+    // 1. Read-only mode (like delivery heterogeneous reviewer reading diff.patch or subagent inspecting context.json / rules.json)
+    writeFileSync(
+      guardFile,
+      JSON.stringify({
+        run: 8,
+        attempt: 1,
+        rule: "delivery-review",
+        cwd: workCwd,
+        access: "read",
+        askFirst: [],
+        approvedKeys: [],
+      }),
+      "utf8",
+    );
+
+    for (const [cmd, ctxEnv] of [
+      [`sed -n '80,160p' "$AUTOLOOP_CONTEXT"`, contextFile],
+      [`nl -ba ${diffPatchFile}`, diffPatchFile],
+      [`awk 'NR<=20 {print}' "$AUTOLOOP_CONTEXT"`, contextFile],
+      [`git apply --stat ${diffPatchFile}`, diffPatchFile],
+      [`git apply --check ${diffPatchFile}`, diffPatchFile],
+      [`python3 -m json.tool "$AUTOLOOP_CONTEXT"`, contextFile],
+      [`autoloop check ${rulesFile}`, contextFile],
+      [`autoloop explain ${rulesFile}`, contextFile],
+    ] as const) {
+      const res = runPreToolHook(
+        { toolCall: { name: "run_command", args: { CommandLine: cmd } } },
+        {
+          AUTOLOOP_GUARD_FILE: guardFile,
+          AUTOLOOP_CONTEXT: ctxEnv,
+          AUTOLOOP_HOME: autoloopHome,
+        },
+      );
+      assert.deepEqual(
+        res,
+        { decision: "allow" },
+        `Expected read-only inspection command to be allowed: ${cmd}`,
+      );
+    }
+
+    // 2. Edit mode: inline readFileSync on AUTOLOOP_CONTEXT must be allowed, while writeFileSync / sed -i / sqlite3 hub.db must be denied!
+    writeFileSync(
+      guardFile,
+      JSON.stringify({
+        run: 8,
+        attempt: 1,
+        rule: "edit-worker",
+        cwd: workCwd,
+        access: "edit",
+        askFirst: [],
+        approvedKeys: [],
+      }),
+      "utf8",
+    );
+
+    assert.deepEqual(
+      runPreToolHook(
+        {
+          toolCall: {
+            name: "run_command",
+            args: {
+              CommandLine:
+                'node -e "console.log(JSON.parse(require(\'fs\').readFileSync(process.env.AUTOLOOP_CONTEXT,\'utf8\')))"',
+            },
+          },
+        },
+        {
+          AUTOLOOP_GUARD_FILE: guardFile,
+          AUTOLOOP_CONTEXT: contextFile,
+          AUTOLOOP_HOME: autoloopHome,
+        },
+      ),
+      { decision: "allow" },
+    );
+
+    for (const badWriteCmd of [
+      `node -e 'require("fs").writeFileSync(${JSON.stringify(contextFile)}, "{}")'`,
+      `node -e "require('fs').writeFileSync(process.env.AUTOLOOP_CONTEXT, '{}')"`,
+      `python3 -c 'open(${JSON.stringify(contextFile)}, "w").write("{}")'`,
+      `python3 -c 'from pathlib import Path; Path(${JSON.stringify(rulesFile)}).write_text("{}")'`,
+      `sed -i '' 's/events/pwn/' "$AUTOLOOP_CONTEXT"`,
+      `tee ${rulesFile}`,
+      `rm -f ${contextFile}`,
+      `sqlite3 ${hubDbFile} "SELECT * FROM runs"`,
+    ]) {
+      const res = runPreToolHook(
+        {
+          toolCall: {
+            name: "run_command",
+            args: { CommandLine: badWriteCmd },
+          },
+        },
+        {
+          AUTOLOOP_GUARD_FILE: guardFile,
+          AUTOLOOP_CONTEXT: contextFile,
+          AUTOLOOP_HOME: autoloopHome,
+        },
+      );
+      assert.equal(
+        res.decision,
+        "deny",
+        `Expected deny for protected write/DB access: ${badWriteCmd}`,
+      );
+    }
+  });
+
+  it("Must-Fix 4: emits deferred non-null session to markStarted after sessionless first event on downgraded run, and clears stale session with null when fresh run never emits a session", async () => {
+    const tmpDir = makeTempDir();
+    const autoloopHome = path.join(tmpDir, "autoloop_home");
+    const workCwd = path.join(tmpDir, "workspace");
+    mkdirSync(workCwd, { recursive: true });
+    const scenarioFile = path.join(tmpDir, "scenario.txt");
+
+    // Subtest A: dead session -> downgraded fresh run -> line 1 has NO session (`{type:"init"}`),
+    // line 2 has `conversationId: "conv-delayed-fresh"`, then mid-turn crash `exit(2)`!
+    // Must call markStarted with "conv-delayed-fresh" so retry preserves "conv-delayed-fresh"!
+    const delayedAgyBin = makeExecutableScript(
+      tmpDir,
+      "delayed-session-agy.mjs",
+      `
+      import { readFileSync } from "node:fs";
+      const args = process.argv.slice(2);
+      const convIdx = args.indexOf("--conversation");
+      const conv = convIdx !== -1 ? args[convIdx + 1] : null;
+      const mode = readFileSync(${JSON.stringify(scenarioFile)}, "utf8").trim();
+
+      if (conv === "conv-dead-old") {
+        console.error("stale session missing");
+        process.exit(1);
+      }
+
+      if (mode === "delayed_crash") {
+        console.log(JSON.stringify({ type: "init" }));
+        console.log(JSON.stringify({ type: "assistant", conversationId: "conv-delayed-fresh", text: "已执行一半副作用..." }));
+        console.error("mid-turn network drop");
+        process.exit(2);
+      }
+
+      if (mode === "sessionless_done") {
+        console.log(JSON.stringify({ type: "init" }));
+        console.log(JSON.stringify({ type: "result", result: "无会话号完成任务" }));
+        process.exit(0);
+      }
+      `,
+    );
+
+    const markStartedCalls: Array<{
+      run: number;
+      session?: string | null;
+    }> = [];
+    const submitResultCalls: Array<{
+      run: number;
+      result: Record<string, unknown>;
+    }> = [];
+
+    // Mock backend for precise verification of markStarted & submitResult payloads
+    let nextJob: Job | null = makeJob({
+      run: 10,
+      token: "tok-10",
+      session: "conv-dead-old",
+      rule: { name: "triage", cwd: workCwd },
+    });
+
+    const spyBackend: SupervisorBackend = {
+      claimWork() {
+        const jobs = nextJob ? [nextJob] : [];
+        nextJob = null;
+        return { jobs, cancel: [] };
+      },
+      markStarted(input) {
+        markStartedCalls.push({ run: input.run, session: input.session });
+        return {};
+      },
+      submitResult(input) {
+        submitResultCalls.push({
+          run: input.run,
+          result: { ...(input.result as unknown as Record<string, unknown>) },
+        });
+        return {};
+      },
+    };
+
+    const supervisor = createSupervisor({
+      autoloopHome,
+      backend: spyBackend,
+      pollIntervalMs: 0,
+      heartbeatIntervalMs: 0,
+      agyBin: delayedAgyBin,
+    });
+
+    try {
+      // Case A: delayed session + mid-turn crash after dead-session downgrade
+      writeFileSync(scenarioFile, "delayed_crash", "utf8");
+      await supervisor.kick();
+      await waitFor(() => submitResultCalls.length === 1);
+
+      assert.equal(markStartedCalls.length, 1);
+      assert.equal(markStartedCalls[0]?.session, "conv-delayed-fresh");
+      assert.equal(submitResultCalls[0]?.result.outcome, "failed");
+      assert.equal(
+        submitResultCalls[0]?.result.session,
+        "conv-delayed-fresh",
+      );
+
+      // Case B: dead-session downgrade -> fresh run succeeds with session === null throughout
+      // Must call markStarted({ session: null }) AND submitResult({ ..., session: null })!
+      markStartedCalls.length = 0;
+      submitResultCalls.length = 0;
+      writeFileSync(scenarioFile, "sessionless_done", "utf8");
+      nextJob = makeJob({
+        run: 11,
+        token: "tok-11",
+        session: "conv-dead-old",
+        rule: { name: "triage", cwd: workCwd },
+      });
+
+      await supervisor.kick();
+      await waitFor(() => submitResultCalls.length === 1);
+
+      assert.equal(markStartedCalls.length, 1);
+      assert.equal(markStartedCalls[0]?.session, null);
+      assert.equal(submitResultCalls[0]?.result.outcome, "done");
+      assert.equal("session" in submitResultCalls[0]!.result, true);
+      assert.equal(submitResultCalls[0]?.result.session, null);
+    } finally {
+      await supervisor.stop();
+    }
+  });
+});

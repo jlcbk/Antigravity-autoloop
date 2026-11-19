@@ -384,6 +384,7 @@ function extractErrorText(event: Record<string, unknown>): string | null {
 
 interface StreamState {
   started: boolean;
+  reportedNonNullSession: boolean;
   sawFinalResult: boolean;
   session: string | null;
   resultText: string | null;
@@ -407,6 +408,7 @@ interface StreamState {
 function createStreamState(): StreamState {
   return {
     started: false,
+    reportedNonNullSession: false,
     sawFinalResult: false,
     session: null,
     resultText: null,
@@ -480,6 +482,16 @@ function processNdjsonLine(
 
     if (confirmsStart && !state.started) {
       state.started = true;
+      if (state.session !== null) {
+        state.reportedNonNullSession = true;
+      }
+      onFirstStarted(state.session);
+    } else if (
+      state.started &&
+      !state.reportedNonNullSession &&
+      state.session !== null
+    ) {
+      state.reportedNonNullSession = true;
       onFirstStarted(state.session);
     }
   }
@@ -783,9 +795,18 @@ export function runAgyPrint(
       }, timeoutMs);
     }
 
+    let lastNotifiedSession: string | null | undefined = undefined;
     const notifyStarted = (session: string | null) => {
+      const effectiveSession = session ?? job.session ?? null;
+      if (
+        lastNotifiedSession !== undefined &&
+        effectiveSession === lastNotifiedSession
+      ) {
+        return;
+      }
+      lastNotifiedSession = effectiveSession;
       onStarted?.({
-        session: session ?? job.session ?? null,
+        session: effectiveSession,
         pid: proc.pid ?? 0,
       });
     };

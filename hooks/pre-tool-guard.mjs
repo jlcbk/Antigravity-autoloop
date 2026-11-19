@@ -78,12 +78,9 @@ const NO_ACCESS_CONTROL_FILES = [
   "ipc.json",
 ];
 
-const NO_WRITE_CONTROL_FILES = [
-  "hub.db",
-  "hub.db-wal",
-  "hub.db-shm",
-  "rules.json",
-];
+const DB_CONTROL_FILES = ["hub.db", "hub.db-wal", "hub.db-shm"];
+
+const TEXT_READONLY_CONTROL_FILES = ["rules.json"];
 
 const SHELL_NAMES = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash"]);
 const NODE_INTERPRETERS = new Set(["node", "nodejs", "bun", "deno"]);
@@ -203,12 +200,14 @@ const HIGH_RISK_CATEGORIES = [
       "drop-table",
       "drop-database",
       "drop-db",
+      "删除数据库",
       "数据库删除",
       "删除生产数据",
     ],
     patternMatches: [
       /\bdrop\s+(?:table|database|schema)\b/i,
       /\btruncate\s+table\b/i,
+      /删除数据库/,
       /数据库删除/,
       /删除生产数据/,
     ],
@@ -362,10 +361,11 @@ function buildControlPlaneSpec(guardFile, guardCwd) {
   homes.add(normalizeComparablePath(path.join(os.homedir(), ".autoloop")));
 
   const noAccessExact = new Set([normGuardFile]);
-  const noWriteExact = new Set();
+  const dbProtectedExact = new Set();
+  const textReadOnlyExact = new Set();
 
   if (process.env.AUTOLOOP_CONTEXT?.trim()) {
-    noWriteExact.add(
+    textReadOnlyExact.add(
       normalizeComparablePath(process.env.AUTOLOOP_CONTEXT.trim()),
     );
   }
@@ -375,8 +375,11 @@ function buildControlPlaneSpec(guardFile, guardCwd) {
     for (const f of NO_ACCESS_CONTROL_FILES) {
       noAccessExact.add(path.join(home, f));
     }
-    for (const f of NO_WRITE_CONTROL_FILES) {
-      noWriteExact.add(path.join(home, f));
+    for (const f of DB_CONTROL_FILES) {
+      dbProtectedExact.add(path.join(home, f));
+    }
+    for (const f of TEXT_READONLY_CONTROL_FILES) {
+      textReadOnlyExact.add(path.join(home, f));
     }
   }
 
@@ -385,7 +388,8 @@ function buildControlPlaneSpec(guardFile, guardCwd) {
     normCwd,
     homes,
     noAccessExact,
-    noWriteExact,
+    dbProtectedExact,
+    textReadOnlyExact,
   };
 }
 
@@ -406,12 +410,14 @@ function isNoAccessControlPath(normPath, cpSpec) {
   return false;
 }
 
-function isNoWriteControlPath(normPath, cpSpec) {
+function isDbControlPath(normPath, cpSpec) {
   if (!normPath) return false;
-  if (isNoAccessControlPath(normPath, cpSpec)) {
-    return true;
-  }
-  if (cpSpec.noWriteExact.has(normPath)) {
+  return cpSpec.dbProtectedExact.has(normPath);
+}
+
+function isReadOnlyTextControlPath(normPath, cpSpec) {
+  if (!normPath) return false;
+  if (cpSpec.textReadOnlyExact.has(normPath)) {
     return true;
   }
   if (path.basename(normPath) === "context.json") {
@@ -424,6 +430,15 @@ function isNoWriteControlPath(normPath, cpSpec) {
     }
   }
   return false;
+}
+
+function isNoWriteControlPath(normPath, cpSpec) {
+  if (!normPath) return false;
+  return (
+    isNoAccessControlPath(normPath, cpSpec) ||
+    isDbControlPath(normPath, cpSpec) ||
+    isReadOnlyTextControlPath(normPath, cpSpec)
+  );
 }
 
 function isProtectedGlobalConfigPath(normPath) {
@@ -1060,6 +1075,18 @@ function extractStringLiterals(code) {
   return literals;
 }
 
+function extractCandidatePathsFromCode(code) {
+  const candidates = new Set(extractStringLiterals(code));
+  const barePathRe = /(?:~\/|\/)[A-Za-z0-9_./-]+/g;
+  let m;
+  while ((m = barePathRe.exec(code)) !== null) {
+    if (m[0]) {
+      candidates.add(m[0]);
+    }
+  }
+  return Array.from(candidates);
+}
+
 function extractRedirectTargets(rawSeg) {
   const targets = [];
   const re = /(?:^|[^0-9&])>{1,2}\s*(['"]?)([^\s'";|&]+)\1/g;
@@ -1070,6 +1097,199 @@ function extractRedirectTargets(rawSeg) {
     }
   }
   return targets;
+}
+
+const TEXT_VIEWER_COMMANDS = new Set([
+  ...PASSIVE_READ_COMMANDS,
+  "less",
+  "more",
+  "nl",
+  "egrep",
+  "fgrep",
+  "yq",
+  "diff",
+  "cmp",
+  "comm",
+  "cut",
+  "tr",
+  "fold",
+  "fmt",
+  "column",
+  "od",
+  "hexdump",
+  "xxd",
+  "shasum",
+  "sha256sum",
+  "sha1sum",
+  "md5",
+  "md5sum",
+  "cksum",
+  "basename",
+  "dirname",
+  "realpath",
+  "readlink",
+  "test",
+  "[",
+]);
+
+const READONLY_GIT_SUBCOMMANDS = new Set([
+  "status",
+  "diff",
+  "log",
+  "show",
+  "rev-parse",
+  "ls-files",
+  "ls-tree",
+  "cat-file",
+  "grep",
+  "blame",
+  "shortlog",
+  "describe",
+  "for-each-ref",
+  "merge-base",
+  "check-ignore",
+  "check-attr",
+  "name-rev",
+  "verify-commit",
+  "verify-tag",
+]);
+
+function isGitApplyReadOnly(gitInfo) {
+  if (!gitInfo || gitInfo.subcommand !== "apply") return false;
+  return gitInfo.args.some(
+    (arg) =>
+      arg === "--stat" ||
+      arg === "--numstat" ||
+      arg === "--summary" ||
+      arg === "--check",
+  );
+}
+
+function isReadOnlyGitInvocation(gitInfo) {
+  if (!gitInfo) return false;
+  if (!gitInfo.subcommand) return true;
+  if (READONLY_GIT_SUBCOMMANDS.has(gitInfo.subcommand)) return true;
+  return isGitApplyReadOnly(gitInfo);
+}
+
+function isSafeReadCommandOnTextTarget(entry) {
+  if (!entry || entry.embedded) return false;
+  const toks = entry.tokens;
+  if (toks.length === 0) return false;
+  const cmd = path.basename(toks[0]).toLowerCase();
+
+  if (TEXT_VIEWER_COMMANDS.has(cmd)) {
+    return true;
+  }
+
+  if (cmd === "sed") {
+    return !toks.some(
+      (t) =>
+        t === "-i" ||
+        t.startsWith("-i") ||
+        t === "--in-place" ||
+        t.startsWith("--in-place="),
+    );
+  }
+
+  if (cmd === "awk" || cmd === "gawk" || cmd === "mawk" || cmd === "nawk") {
+    const hasInplace = toks.some(
+      (t) =>
+        t === "-i" ||
+        t.startsWith("-i") ||
+        t === "--inplace" ||
+        t === "inplace",
+    );
+    return !hasInplace;
+  }
+
+  if (cmd === "sort") {
+    return !toks.some(
+      (t) =>
+        t === "-o" ||
+        t.startsWith("-o") ||
+        t === "--output" ||
+        t.startsWith("--output="),
+    );
+  }
+
+  if (cmd === "git") {
+    return isReadOnlyGitInvocation(parseGitSegment(toks));
+  }
+
+  if (PYTHON_INTERPRETER_RE.test(cmd)) {
+    return (
+      toks[1] === "-m" &&
+      toks[2] === "json.tool" &&
+      toks.length <= 4
+    );
+  }
+
+  if (cmd === "autoloop") {
+    const sub = String(toks[1] ?? "").toLowerCase();
+    return sub === "check" || sub === "explain" || sub === "status" || sub === "why";
+  }
+
+  if (NODE_INTERPRETERS.has(cmd) && /cli\/main\.[cm]?[jt]s$/i.test(toks[1] ?? "")) {
+    const sub = String(toks[2] ?? "").toLowerCase();
+    return sub === "check" || sub === "explain" || sub === "status" || sub === "why";
+  }
+
+  return false;
+}
+
+function inlineCodeHasWriteIntent(code) {
+  if (!code) return false;
+  const stripped = code.replace(
+    /\b(?:process|sys)\s*\.\s*(?:stdout|stderr)\s*\.\s*write\b/g,
+    " ",
+  );
+
+  if (
+    /\b(?:writeFile|writeFileSync|appendFile|appendFileSync|createWriteStream|rmSync|rmdirSync|unlinkSync|renameSync|copyFileSync|cpSync|truncateSync|ftruncateSync|chmodSync|chownSync|utimesSync|linkSync|symlinkSync|writeSync)\b/.test(
+      stripped,
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\b(?:fs|fsp|fsPromises|promises|Bun)\s*\.\s*(?:write|writeFile|appendFile|rm|rmdir|unlink|rename|copyFile|cp|truncate|chmod|chown|utimes|link|symlink)\b/.test(
+      stripped,
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\bopen\s*\([^)]*(?:,\s*['"][^'"]*[wax+][^'"]*['"]|mode\s*=\s*['"][^'"]*[wax+])/.test(
+      stripped,
+    )
+  ) {
+    return true;
+  }
+
+  if (/\.write(?:_text|_bytes|lines)?\s*\(/.test(stripped)) {
+    return true;
+  }
+
+  if (
+    /\b(?:os|shutil|pathlib|File|FileUtils)\s*\.\s*(?:remove|unlink|rmdir|removedirs|rmtree|rename|renames|replace|copy|copy2|copyfile|move|chmod|chown|truncate|rm|rm_rf)\b/.test(
+      stripped,
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    /\bfile_put_contents\s*\(|\b(?:execSync|execFileSync|spawnSync|child_process|subprocess)\b|\bos\s*\.\s*system\s*\(/.test(
+      stripped,
+    )
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -1094,10 +1314,12 @@ function inspectCommandProtectedTargets(commandLine, cpSpec) {
     const cmd = path.basename(entry.tokens[0] ?? "").toLowerCase();
     const redirects = extractRedirectTargets(entry.raw);
     const hasRedirect = redirects.length > 0;
-    const isPassiveRead =
+    const isSafeDbMetaRead =
       !hasRedirect &&
       !entry.embedded &&
-      PASSIVE_READ_COMMANDS.has(cmd);
+      (cmd === "ls" || cmd === "stat" || cmd === "file");
+    const isSafeTextRead =
+      !hasRedirect && isSafeReadCommandOnTextTarget(entry);
 
     // Check redirect targets (always write operations!)
     for (const rTarget of redirects) {
@@ -1127,41 +1349,58 @@ function inspectCommandProtectedTargets(commandLine, cpSpec) {
       if (isNoAccessControlPath(normCandidate, cpSpec)) {
         return CONTROL_PLANE_PROTECT_DENY_REASON;
       }
-      if (!isPassiveRead) {
+      if (isDbControlPath(normCandidate, cpSpec) && !isSafeDbMetaRead) {
+        return CONTROL_PLANE_PROTECT_DENY_REASON;
+      }
+      if (!isSafeTextRead) {
         if (isProtectedGlobalConfigPath(normCandidate)) {
           return CONFIG_PROTECT_DENY_REASON;
         }
-        if (isNoWriteControlPath(normCandidate, cpSpec)) {
+        if (isReadOnlyTextControlPath(normCandidate, cpSpec)) {
           return CONTROL_PLANE_PROTECT_DENY_REASON;
         }
       }
     }
 
-    // Check string literals inside interpreter inline scripts (`node -e`, `python -c`, etc.)
+    // Check string literals & env vars inside interpreter inline scripts (`node -e`, `python -c`, etc.)
     if (entry.embedded && entry.embedded.kind === "interpreter") {
       const code = entry.embedded.code || "";
-      if (/AUTOLOOP_GUARD_FILE|AUTOLOOP_OWNER_TOKEN|AUTOLOOP_MASTER_KEY/.test(code)) {
+      if (
+        /AUTOLOOP_GUARD_FILE|AUTOLOOP_OWNER_TOKEN|AUTOLOOP_MASTER_KEY|AUTOLOOP_INGEST_TOKEN/.test(
+          code,
+        )
+      ) {
         return CONTROL_PLANE_PROTECT_DENY_REASON;
       }
-      for (const lit of extractStringLiterals(code)) {
+      const hasWriteIntent = inlineCodeHasWriteIntent(code);
+      if (hasWriteIntent && /\bAUTOLOOP_CONTEXT\b/.test(code)) {
+        return CONTROL_PLANE_PROTECT_DENY_REASON;
+      }
+      for (const lit of extractCandidatePathsFromCode(code)) {
         if (
           !lit.includes("/") &&
           !NO_ACCESS_CONTROL_FILES.includes(lit) &&
-          !NO_WRITE_CONTROL_FILES.includes(lit) &&
-          lit !== "guard.json"
+          !DB_CONTROL_FILES.includes(lit) &&
+          !TEXT_READONLY_CONTROL_FILES.includes(lit) &&
+          lit !== "guard.json" &&
+          lit !== "context.json"
         ) {
           continue;
         }
         const normLit = normalizeComparablePath(lit, baseDir);
-        if (isProtectedGlobalConfigPath(normLit)) {
-          return CONFIG_PROTECT_DENY_REASON;
-        }
-        if (
-          isNoAccessControlPath(normLit, cpSpec) ||
-          cpSpec.noWriteExact.has(normLit) &&
-            path.basename(normLit) !== "context.json"
-        ) {
+        if (isNoAccessControlPath(normLit, cpSpec)) {
           return CONTROL_PLANE_PROTECT_DENY_REASON;
+        }
+        if (isDbControlPath(normLit, cpSpec)) {
+          return CONTROL_PLANE_PROTECT_DENY_REASON;
+        }
+        if (hasWriteIntent) {
+          if (isProtectedGlobalConfigPath(normLit)) {
+            return CONFIG_PROTECT_DENY_REASON;
+          }
+          if (isReadOnlyTextControlPath(normLit, cpSpec)) {
+            return CONTROL_PLANE_PROTECT_DENY_REASON;
+          }
         }
       }
     }
@@ -1405,8 +1644,24 @@ function isWriteShellCommand(commandLine) {
     if (cmd === "perl" && toks.some((t) => t === "-i" || t.startsWith("-i"))) {
       return true;
     }
+    if (
+      (cmd === "awk" || cmd === "gawk" || cmd === "mawk" || cmd === "nawk") &&
+      toks.some(
+        (t) =>
+          t === "-i" ||
+          t.startsWith("-i") ||
+          t === "--inplace" ||
+          t === "inplace",
+      )
+    ) {
+      return true;
+    }
     const gitInfo = parseGitSegment(toks);
-    if (gitInfo && mutatingGitSubcommands.has(gitInfo.subcommand)) {
+    if (
+      gitInfo &&
+      mutatingGitSubcommands.has(gitInfo.subcommand) &&
+      !isGitApplyReadOnly(gitInfo)
+    ) {
       return true;
     }
     if (cmd === "find" && toks.some((t) => t === "-delete")) {
