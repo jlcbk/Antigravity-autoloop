@@ -28,10 +28,10 @@
 Agent 即可直接调用 MCP 工具完成查询、批卡、校验草稿与派单，无需记命令行参数。
 
 ### 效果三：全自动代码交付与异构模型互审闭环
-当开发子代理在功能分支完成代码提交并发出 `branch.ready` 事件（或打上交付标记）后，Autoloop 自动接管后续五步：
-1. **异构只读审查**：唤醒与作者不同的模型（例如 Carbon 写的代码自动派给 `gemini-4-hydrogen-xhigh` 在 `--mode plan --sandbox` 下只读审查 Git 快照差异），只挑真实 Bug 与越界风险，最多来回 3 轮，同一提交绝不审第二遍；
+当开发子代理在功能分支完成代码提交并发出 `branch.ready` 事件（或打上交付标记）后，Autoloop 自动接管后续四步：
+1. **异构只读与两级增量审查**：唤醒与作者不同的模型（例如 Carbon 写的代码自动派给 `gemini-4-hydrogen-xhigh`，Hydrogen 写的代码自动派给 `gemini-4-carbon-high`，在 `--mode plan --sandbox` 下无状态只读审查裸 Git 快照，单轮默认 30 分钟超时）：第 1 轮审全量差异并要求每条阻塞项写明具体触发路径（普通测试文件分节轻读）；第 2 轮起提取 `prevSha..headSha` 增量 Diff 结合上轮未决阻塞清单定向复核（纯 `*.md` 改动自动回退全量严防蒙混过关）；默认最多 2 轮，超限未决自动升级为人工批奏折卡片拍板，且跨分支名按 Commit SHA 幂等缓存绝不重审同一提交；
 2. **隔离工作树检查**：在临时 `git worktree` 中执行 `typecheck`、单元测试与安全门禁，绝不污染用户正在编辑的主工作区；
-3. **合并落盘**：检查与审查双通过后自动合并至目标分支（如涉及 `review.xhigh` 敏感目录或冲突则自动转交一张批奏折卡片请用户拍板）；
+3. **合并落盘**：检查与审查双通过后自动合并至目标分支（如涉及 `sensitivePaths` 敏感目录或冲突则自动转交一张批奏折卡片请用户拍板）；
 4. **构建/健康核实**：运行合并后冒烟验证，记录交付账本并发送 `fyi` 结案简报。
 
 ---
@@ -43,11 +43,11 @@ Agent 即可直接调用 MCP 工具完成查询、批卡、校验草稿与派单
 | **FR-01** | **多源本地事件接入层** | P0 | 1. 内置 Cron 定时引擎（支持 IANA 时区、夏令时防重、休眠唤醒仅补最近一次）；<br/>2. 本地文件与目录变更监听源（防抖合并、生成稳定事件 `id`）；<br/>3. 零 Token 命令探针源（`use: "command"`，脚本退出码 0 且仅在发现增量时回传 `events`）；<br/>4. 本地回环 HTTP/MCP 事件投递入口，按 `source + id` 严格幂等去重。 |
 | **FR-02** | **声明式规则与并发调度引擎** | P0 | 1. 解析并热加载 `rules.json`（含 JSON Schema 强校验，改坏时保留旧规则继续运行并推告警卡）；<br/>2. 支持按 `source + types`（含通配符 `alert.*`）或 `cron` 路由；<br/>3. 三级并发控制：全局 Worker 容量 `capacity`、规则组上限 `group + parallel`、单规则/单模型上限 `maxActive`；<br/>4. 同事项（`rule + subject`）运行期间新来事件自动排队合并为一轮；<br/>5. 规则动态 `pause`、`resume`（展示跳过事件列表）、`replay --since`（每条只补一次）与 `run` 立即执行。 |
 | **FR-03** | **Antigravity 原生多模型执行器** | P0 | 1. **`agy-print` 主执行器**：封装 `agy -p --output-format stream-json`，支持配置任意 Antigravity 模型（如 `gemini-4-hydrogen-high`、`gemini-4-carbon-high`、`claude-opus-5-5-high` 等）、推理强度 `effort` 与权限映射（`read`→`plan+sandbox`，`edit`→`accept-edits+sandbox`，`full`→`auto`）；<br/>2. **`agentapi-ui` 交互执行器**：支持为需要可视化会话或内置 `browser` 子代理的任务创建/唤醒客户端会话；<br/>3. **跨轮原会话续接**：回答卡片、到期复查或 `resume: true` 时通过 `--conversation <id>` 精准续接；若该会话正在被另一轮占用或上一轮被手动取消，则安全降级开新会话并携带资料；<br/>4. **增量 Token 用量核算**：自动提取并累加每轮 `input`、`output`、`cached` Token 用量。 |
-| **FR-04** | **原子回执协议与无损纠错** | P0 | 1. 解析末尾 ```` ```agent-autoloop ```` 代码块的五类动作：`ask`、`notice`（含 `fyi`）、`resolve`、`later`（含改期与 `cancel`）、`events`；<br/>2. 首行状态识别：`没跑成：` / `FAILED:` 触发指数退避重试（上限 10 次），`没事可做：` / `NOTHING:` 静默归档，其余记为 `done`；<br/>3. 回执语法错误时，在原会话注入 `repairPrompt` 仅重写最后一条消息（最多 2 次），严禁重跑业务工具；<br/>4. 衍生事件强制校验规则 `emits` 白名单并递增 `hops`，`hops > 8` 自动熔断。 |
-| **FR-05** | **双重安全护栏（隔离 + 硬钩子）** | P0 | 1. **指令数据物理分离**：不可信事件正文写入每轮隔离目录的 `context.json`，Prompt 仅含受检标识符；<br/>2. **`PreToolUse` 硬拦截钩子**：检测 `AUTOLOOP_RUN_ID` 上下文，对违反 `access: "read"` 的写操作或命中 `askFirst` 高危模式且无有效批准记录的命令直接返回 `"decision": "deny"`；<br/>3. **`Stop` 回执预检钩子**：在模型回合结束瞬间校验疑似回执代码块格式，格式非法立即返回 `"decision": "continue"` 原地修复。 |
-| **FR-06** | **右侧辅助面板「批奏折工作台」与通知** | P0 | 1. 基于 `SidecarApp` 构建响应式 Web UI（自动适配 Antigravity 深浅色主题 CSS 变量）；<br/>2. 支持待批卡片一键批红、自由文本批复、通知卡片一键结案备注；<br/>3. 支持实时状态流（ETag/增量序列号轮询）、规则暂停/恢复/补跑/立跑、运行中轮次强制停止（连同子进程组清理）；<br/>4. 支持 `why` 时间线溯源及一键复制/跳转原会话；<br/>5. 新 `open` 提问卡到达时触发 macOS 原生系统通知（参数隔离防命令注入）。 |
+| **FR-04** | **原子回执协议与无损纠错** | P0 | 1. 解析末尾 ```` ```agent-autoloop ```` 代码块（支持自底向上逆向围栏扫描）的五类动作：`ask`、`notice`（含 `fyi`）、`resolve`、`later`（含改期与 `cancel`）、`events`；<br/>2. 首行状态识别（自动剥离前导 Markdown 装饰符）：`没跑成：` / `FAILED:` 触发 `60s * 2^(attempt-1)` 指数退避重试（上限 30m / 10 次，第 3 次连续失败发末行摘要预警卡并在恢复后自动关闭），`没事可做：` / `NOTHING:` 静默归档，其余记为 `done`（`tell: "always"` 无卡完成自动补 `fyi` 简报卡）；<br/>3. 回执语法错误时，在原会话注入 `repairPrompt` 仅重写最后一条消息（最多 2 次）；若首轮业务已完成但 2 次修复仍失败，执行 `discardReceipt` 安全降级保留结论并推告警卡，严禁重跑业务副作用；<br/>4. 衍生事件强制校验规则 `emits` 白名单并递增 `hops`，`hops > 8` 自动熔断。 |
+| **FR-05** | **双重安全护栏（隔离 + 硬钩子）** | P0 | 1. **指令数据物理分离**：不可信事件正文写入每轮隔离目录的 `context.json`（外部 `link` 仅允许 `http://`/`https://`），Prompt 仅含受检标识符；<br/>2. **`PreToolUse` 硬拦截钩子与控制面自保护**：对密级文件（`guard.json`/`owner.token`/`master.key` 等）执行零访问封锁，对 `hub.db*` 与 `rules.json` 执行写保护，穿透子 Shell 与 `node -e`/`python -c` 拦截违反 `access: "read"` 或未获批 `askFirst` 的调用，并精准识别中英文否定批复防误授权限；<br/>3. **`Stop` 回执预检钩子**：在模型回合结束瞬间校验疑似回执代码块格式，格式非法立即返回 `"decision": "continue"` 原地修复。 |
+| **FR-06** | **右侧辅助面板「批奏折工作台」与通知** | P0 | 1. 基于 `SidecarApp` 构建响应式 Web UI（自动适配 Antigravity 深浅色主题 CSS 变量）；<br/>2. 支持待批卡片一键批红、自由文本批复、通知卡片一键结案备注；<br/>3. 支持实时状态流（ETag/增量序列号轮询）、规则暂停/恢复/补跑/立跑、运行中轮次强制停止（连同子进程组清理）；<br/>4. 支持 `why` 时间线溯源及一键复制/跳转原会话；<br/>5. 新 `open` 卡片（及 `tell: "always"` 的 `fyi` 简报卡）到达时触发带 `[<rule>]` 前缀的 macOS 原生系统通知（参数隔离防命令注入）。 |
 | **FR-07** | **Stdio MCP 聊天控制桥** | P1 | 在插件 `mcp_config.json` 中注册 `autoloop_hub` MCP 服务，暴露只读查询（`autoloop_status`、`autoloop_why`、`autoloop_explain_rules`）与本人管理操作（`autoloop_answer`、`autoloop_resolve`、`autoloop_emit`、`autoloop_pause`、`autoloop_resume`、`autoloop_replay`、`autoloop_run`、`autoloop_stop`）；同时在子代理启动环境中自动剥离本人管理凭据，防止子代理「自己批自己的奏折」。 |
-| **FR-08** | **本地异构审查交付与五大开箱模板** | P1 | 1. 实现本地分支交付器 `delivery/`（只读 Git 差异快照生成 → 异构模型只读审查账本 → 隔离 Worktree 测试检查 → 自动合并 → 冒烟核实）；<br/>2. 内置 5 套即拿即用规则与 Skill 模板：每日研发早报、本地待办/Issue 自动分诊、每周代码清理大扫除、分支异构审查交付、本地服务健康巡检；<br/>3. 内置交互式试跑命令 `autoloop try`（1 分钟走完「发事件 → Hydrogen 接单提问 → 零消耗挂起 → 面板点选颜色 → 续接原会话完结」全流程）。 |
+| **FR-08** | **本地异构审查交付与七大开箱模板** | P1 | 1. 实现本地分支交付器 `delivery/`（只读裸 Git 差异快照生成 → 异构模型两级增量定向复核（第 2 轮 `prevSha..headSha` 增量 Diff，默认 2 轮上限超限转人工奏折卡）→ 隔离 Worktree 测试检查 → 自动合并 → 冒烟核实）；<br/>2. 内置 **7 套**即拿即用规则与场景 SOP Skill 模板：<br/>　① `recipe-morning-brief`（每日研发早报）<br/>　② `recipe-issue-triage`（本地待办/Issue 独立复现与自动分诊）<br/>　③ `recipe-code-sweep`（周期性代码清理大扫除，联动双账本避坑）<br/>　④ `recipe-pr-delivery`（分支异构两级增量审查与安全合并交付）<br/>　⑤ `recipe-health-watch`（零 Token 本地/HTTP 服务健康巡检与故障自愈）<br/>　⑥ `recipe-idea-to-sop`（新观点/外部教程拆解试跑、双账本偏好校准与永久 SOP 规则固化五步工作流）<br/>　⑦ `recipe-ai-video-studio`（九阶段低抽卡率 AI 视频制片厂：错误前置成本漏斗、四节点零上下文盲审、首尾帧像素差分、Seedance/H3 七段式提示词、代码优先救片与 `ffmpeg` 程序化成片合成）；<br/>3. 内置交互式试跑命令 `autoloop try`（1 分钟走完「发事件 → Hydrogen 接单提问 → 零消耗挂起 → 面板点选颜色 → 续接原会话完结」全流程）。 |
 
 ---
 
