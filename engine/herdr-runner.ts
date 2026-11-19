@@ -1603,116 +1603,115 @@ export async function runHerdrAgent(
         );
         if (cwdReady.length > 0) {
           resolvedTarget = cwdReady[0];
+        } else if (selectorMode === "spawn") {
+          // 2.2 `spawn:<kind>`: never hijack an unrelated project's open pane; reuse idle shell pane in target cwd, else `workspace create --no-focus`
+          const idleShell = allTargets.find(
+            (t) =>
+              isIdleShellPane(t) &&
+              targetMatchesCwd(t, comparableCwd, homeDir, isRemote),
+          );
+          let shellPaneId = idleShell?.paneId;
+
+          if (!shellPaneId) {
+            const wsLabel = sanitizeWorkspaceLabel(job.rule.name);
+            const createExec = await runHerdrCmd(
+              [
+                "workspace",
+                "create",
+                "--cwd",
+                expandedCwd,
+                "--label",
+                wsLabel,
+                "--no-focus",
+              ],
+              { signal, timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS },
+            );
+            if (signal?.aborted || createExec.aborted) {
+              return cancelledExecution(null, false);
+            }
+            if (createExec.exitCode !== 0 || createExec.spawnError) {
+              const err = parseCliErrorDetail(createExec);
+              return preStartFailure(`Herdr 创建工作区失败: ${err.message}`);
+            }
+            const createJson = parseHerdrJsonResult(createExec.stdout);
+            const rootPane = asRecord(createJson?.root_pane);
+            const splitPane = asRecord(createJson?.pane);
+            shellPaneId = firstNonEmpty(
+              typeof rootPane?.pane_id === "string"
+                ? rootPane.pane_id
+                : undefined,
+              typeof splitPane?.pane_id === "string"
+                ? splitPane.pane_id
+                : undefined,
+              typeof createJson?.pane_id === "string"
+                ? createJson.pane_id
+                : undefined,
+            );
+            if (!shellPaneId) {
+              return preStartFailure(
+                "Herdr workspace create 未返回有效 pane_id",
+              );
+            }
+          }
+
+          const startName = buildUniqueAgentStartName(
+            job.run,
+            job.attempt,
+            agentNames,
+          );
+          const startExec = await runHerdrCmd(
+            [
+              "agent",
+              "start",
+              startName,
+              "--kind",
+              normalizedKind,
+              "--pane",
+              shellPaneId,
+            ],
+            { signal, timeoutMs: 60_000 },
+          );
+          if (signal?.aborted || startExec.aborted) {
+            return cancelledExecution(null, false);
+          }
+          if (startExec.exitCode !== 0 || startExec.spawnError) {
+            const err = parseCliErrorDetail(startExec);
+            return preStartFailure(
+              `Herdr 启动 ${normalizedKind} Agent 失败: ${err.message}`,
+            );
+          }
+          const startJson = parseHerdrJsonResult(startExec.stdout);
+          const startedAgent = asRecord(startJson?.agent);
+          const startedPaneId =
+            firstNonEmpty(
+              typeof startedAgent?.pane_id === "string"
+                ? startedAgent.pane_id
+                : undefined,
+            ) ?? shellPaneId;
+          const startedStatus =
+            firstNonEmpty(
+              typeof startedAgent?.agent_status === "string"
+                ? startedAgent.agent_status
+                : undefined,
+            ) ?? "idle";
+
+          resolvedTarget = {
+            paneId: startedPaneId,
+            cwd: expandedCwd,
+            foregroundCwd: expandedCwd,
+            agentKind: normalizedKind,
+            agentName: startName,
+            agentStatus: startedStatus,
+            hasLiveAgent: true,
+          };
         } else {
-          // 2.2 Globally unique idle/done instance of that kind
+          // 2.3 `kind:<kind>`: fall back to globally unique idle/done instance of that kind, else surface busy/blocked candidate
           const globalReady = ofKind.filter((t) =>
             isReadyStatus(t.agentStatus),
           );
           if (globalReady.length === 1) {
             resolvedTarget = globalReady[0];
-          } else if (selectorMode === "spawn") {
-            // 2.3 Spawn when missing: reuse idle shell pane in target cwd, else workspace create --no-focus
-            const idleShell = allTargets.find(
-              (t) =>
-                isIdleShellPane(t) &&
-                targetMatchesCwd(t, comparableCwd, homeDir, isRemote),
-            );
-            let shellPaneId = idleShell?.paneId;
-
-            if (!shellPaneId) {
-              const wsLabel = sanitizeWorkspaceLabel(job.rule.name);
-              const createExec = await runHerdrCmd(
-                [
-                  "workspace",
-                  "create",
-                  "--cwd",
-                  expandedCwd,
-                  "--label",
-                  wsLabel,
-                  "--no-focus",
-                ],
-                { signal, timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS },
-              );
-              if (signal?.aborted || createExec.aborted) {
-                return cancelledExecution(null, false);
-              }
-              if (createExec.exitCode !== 0 || createExec.spawnError) {
-                const err = parseCliErrorDetail(createExec);
-                return preStartFailure(`Herdr 创建工作区失败: ${err.message}`);
-              }
-              const createJson = parseHerdrJsonResult(createExec.stdout);
-              const rootPane = asRecord(createJson?.root_pane);
-              const splitPane = asRecord(createJson?.pane);
-              shellPaneId = firstNonEmpty(
-                typeof rootPane?.pane_id === "string"
-                  ? rootPane.pane_id
-                  : undefined,
-                typeof splitPane?.pane_id === "string"
-                  ? splitPane.pane_id
-                  : undefined,
-                typeof createJson?.pane_id === "string"
-                  ? createJson.pane_id
-                  : undefined,
-              );
-              if (!shellPaneId) {
-                return preStartFailure(
-                  "Herdr workspace create 未返回有效 pane_id",
-                );
-              }
-            }
-
-            const startName = buildUniqueAgentStartName(
-              job.run,
-              job.attempt,
-              agentNames,
-            );
-            const startExec = await runHerdrCmd(
-              [
-                "agent",
-                "start",
-                startName,
-                "--kind",
-                normalizedKind,
-                "--pane",
-                shellPaneId,
-              ],
-              { signal, timeoutMs: 60_000 },
-            );
-            if (signal?.aborted || startExec.aborted) {
-              return cancelledExecution(null, false);
-            }
-            if (startExec.exitCode !== 0 || startExec.spawnError) {
-              const err = parseCliErrorDetail(startExec);
-              return preStartFailure(
-                `Herdr 启动 ${normalizedKind} Agent 失败: ${err.message}`,
-              );
-            }
-            const startJson = parseHerdrJsonResult(startExec.stdout);
-            const startedAgent = asRecord(startJson?.agent);
-            const startedPaneId =
-              firstNonEmpty(
-                typeof startedAgent?.pane_id === "string"
-                  ? startedAgent.pane_id
-                  : undefined,
-              ) ?? shellPaneId;
-            const startedStatus =
-              firstNonEmpty(
-                typeof startedAgent?.agent_status === "string"
-                  ? startedAgent.agent_status
-                  : undefined,
-              ) ?? "idle";
-
-            resolvedTarget = {
-              paneId: startedPaneId,
-              cwd: expandedCwd,
-              foregroundCwd: expandedCwd,
-              agentKind: normalizedKind,
-              agentName: startName,
-              agentStatus: startedStatus,
-              hasLiveAgent: true,
-            };
           } else {
-            // kind:<agentKind> without spawn: surface busy/blocked candidate if present so state gate reports exact reason
             const cwdBusyOrBlocked = ofKind.find((t) =>
               targetMatchesCwd(t, comparableCwd, homeDir, isRemote),
             );

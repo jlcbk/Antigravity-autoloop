@@ -76,7 +76,6 @@
     "claude-worker": {
       "name": "Claude Code / ZCode Stream Worker",
       "runner": "claude",
-      "effort": "high",
       "access": "edit",
       "maxActive": 2,
       "timeoutMinutes": 45

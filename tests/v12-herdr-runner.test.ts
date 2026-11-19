@@ -1194,7 +1194,7 @@ process.exit(0);
           workspace_id: "w1",
           cwd: "/elsewhere",
           foreground_cwd: "/elsewhere",
-          agent: "claude",
+          agent: "opencode",
           agent_status: "idle",
         },
       ],
@@ -1202,7 +1202,7 @@ process.exit(0);
         {
           pane_id: "w1:p1",
           workspace_id: "w1",
-          agent: "claude",
+          agent: "opencode",
           agent_status: "idle",
           cwd: "/elsewhere",
           foreground_cwd: "/elsewhere",
