@@ -28,6 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import {
+  cleanTuiFrameChrome,
   extractRemoteTurnOutput,
   runHerdrAgent,
 } from "../engine/herdr-runner.ts";
@@ -2075,5 +2076,39 @@ describe("runHerdrAgent security isolation, state guards & cancellation", () => 
     assert.equal(extracted2.includes('"stale"'), false);
     assert.equal(extracted2.includes('"fresh"'), true);
     assert.match(extracted2, /^已完成窗口偏移增量提取/);
+  });
+
+  it("cleanTuiFrameChrome strips OpenCode/Claude alternate-screen borders, tool pills, and restores hidden receipt fences", () => {
+    const rawOpenCodeScreen = [
+      "┃  + 1 thought, 1 read",
+      "┃",
+      "┃  需确认：已读取 context.json 并提取口令 NONCE-9753。",
+      "┃",
+      '┃    {"ask":[{"key":"confirm","title":"确认","text":"NONCE-9753","options":["同意","取消"],"recommend":0}]}',
+      "┃",
+      "┃  ▣  Build · glm-5 · 4.1s",
+      "╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+      'Ask anything... "Fix broken tests"',
+      "ctrl+p commands",
+    ].join("\n");
+
+    const cleaned = cleanTuiFrameChrome(rawOpenCodeScreen);
+    assert.match(cleaned, /^需确认：已读取 context\.json/);
+    assert.equal(cleaned.includes("+ 1 thought"), false);
+    assert.equal(cleaned.includes("```agent-autoloop\n{"), true);
+
+    const rawClaudeScreen = [
+      "✻ Thought for 13s (ctrl+o to expand)",
+      "⏺ 联调已完成。",
+      "```agent-autoloop",
+      '{"notice":[{"key":"ok","title":"完成","text":"真机通过","fyi":true}]}',
+      "```",
+      "? for shortcuts",
+    ].join("\n");
+
+    const cleanedClaude = cleanTuiFrameChrome(rawClaudeScreen);
+    assert.match(cleanedClaude, /^联调已完成。/);
+    assert.equal(cleanedClaude.includes("Thought for 13s"), false);
+    assert.equal(cleanedClaude.includes("```agent-autoloop"), true);
   });
 });

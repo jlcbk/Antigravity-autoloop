@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/
 
 ## [1.2.0] - 2026-11-20
 
-本版本正式将执行层升级为 **「八模全通道执行矩阵（后台正规军 + 前台特种兵）」**，在不改动纯函数内核（`kernel/` 零修改）且保持零第三方运行时依赖的前提下，新增 **`codex`、`claude`（兼容 `zcode`/`dsh`）、`acp`（通用 Agent Client Protocol 万能口）、`herdr`（交互式常驻窗格/远程机器特种通道）** 四大外部执行器，并支持在本地分支交付流水线中配置 **跨厂商异构只读代码盲审（`reviewerRunner`）**。全仓自动化测试扩展至 **66 个测试套件、237 个用例**。
+本版本正式将执行层升级为 **「八模全通道执行矩阵（后台正规军 + 前台特种兵）」**，在不改动纯函数内核（`kernel/` 零修改）且保持零第三方运行时依赖的前提下，新增 **`codex`、`claude`（兼容 `zcode`/`dsh`）、`acp`（通用 Agent Client Protocol 万能口）、`herdr`（交互式常驻窗格/远程机器特种通道）** 四大外部执行器，并支持在本地分支交付流水线中配置 **跨厂商异构只读代码盲审（`reviewerRunner`）**。全仓自动化测试扩展至 **66 个测试套件、238 个用例**。
 
 ### Added
 
