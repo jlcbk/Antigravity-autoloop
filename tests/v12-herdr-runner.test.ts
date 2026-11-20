@@ -2117,5 +2117,37 @@ describe("runHerdrAgent security isolation, state guards & cancellation", () => 
     assert.match(cleanedClaude, /^联调已完成。/);
     assert.equal(cleanedClaude.includes("Thought for 13s"), false);
     assert.equal(cleanedClaude.includes("```agent-autoloop"), true);
+
+    const softWrappedClaudeScreen = [
+      "⏺ 已完成：sum.mjs 存在减法缺陷。",
+      '  {"notice":[{"key":"manual-claude-ok","title":"加法缺陷检查","text":"sum.mjs 使用了 a',
+      '    - b 而非 a + b，应修改运算符","fyi":true}]}',
+      "  \ue0b6 cui\ue0b0 ~/repo \ue0b0",
+      "  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt",
+    ].join("\n");
+
+    const cleanedWrapped = cleanTuiFrameChrome(softWrappedClaudeScreen);
+    assert.match(cleanedWrapped, /^已完成：sum\.mjs 存在减法缺陷。/);
+    assert.equal(cleanedWrapped.includes("auto mode on"), false);
+    assert.equal(cleanedWrapped.includes("```agent-autoloop"), true);
+    assert.equal(cleanedWrapped.includes('"manual-claude-ok"'), true);
+    assert.equal(cleanedWrapped.includes("a - b"), true);
+
+    const multiStepClaudeScrollback = [
+      "⏺ 本轮任务：先读取文件再修复测试。",
+      "⏺ Read(sum.mjs)",
+      "  ⎿  Read 3 lines",
+      "⏺ Update(sum.mjs)",
+      "  ⎿  Updated sum.mjs with 1 addition and 1 removal",
+      "⏺ Bash(node --test sum.test.mjs)",
+      "  ⎿  ✔ sum(7, 5) === 12",
+      "⏺ 已修复 sum.mjs 加法实现并通过单测。",
+      '  {"notice":[{"key":"manual-claude-edit-done","title":"修复完成","text":"单测通过","fyi":true}]}',
+    ].join("\n");
+
+    const cleanedMultiStep = cleanTuiFrameChrome(multiStepClaudeScrollback);
+    assert.match(cleanedMultiStep, /^已修复 sum\.mjs 加法实现并通过单测。/);
+    assert.equal(cleanedMultiStep.includes("先读取文件"), false);
+    assert.equal(cleanedMultiStep.includes('"manual-claude-edit-done"'), true);
   });
 });

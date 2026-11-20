@@ -17,6 +17,7 @@ import {
   existsSync,
   mkdirSync,
   realpathSync,
+  rmdirSync,
   rmSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -1294,6 +1295,81 @@ export function buildHerdrWrappedPrompt(options: {
   ].join("\n");
 }
 
+function parseTuiWrappedJsonObject(
+  rawCandidate: string,
+): Record<string, unknown> | null {
+  const tryObject = (text: string): Record<string, unknown> | null => {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Fall through to soft-wrap repair.
+    }
+    return null;
+  };
+
+  const direct = tryObject(rawCandidate);
+  if (direct) {
+    return direct;
+  }
+
+  // Repair unescaped line breaks injected by TUI viewport word-wrapping inside JSON string literals.
+  let out = "";
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < rawCandidate.length; i++) {
+    const ch = rawCandidate[i]!;
+    if (!inString) {
+      out += ch;
+      if (ch === '"') {
+        inString = true;
+      }
+      continue;
+    }
+    if (escaped) {
+      out += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      out += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      out += ch;
+      inString = false;
+      continue;
+    }
+    if (ch === "\r" || ch === "\n") {
+      while (
+        i + 1 < rawCandidate.length &&
+        (rawCandidate[i + 1] === "\r" ||
+          rawCandidate[i + 1] === "\n" ||
+          rawCandidate[i + 1] === " " ||
+          rawCandidate[i + 1] === "\t")
+      ) {
+        i += 1;
+      }
+      const prev = out.length > 0 ? out[out.length - 1]! : "";
+      const next = i + 1 < rawCandidate.length ? rawCandidate[i + 1]! : "";
+      const nextTwo = rawCandidate.slice(i + 1, i + 3);
+      const needsSpace =
+        /[A-Za-z0-9,+*=):;!?]/.test(prev) &&
+        (/[A-Za-z0-9(+*=]/.test(next) || nextTwo === "- ");
+      if (needsSpace) {
+        out += " ";
+      }
+      continue;
+    }
+    out += ch;
+  }
+
+  return tryObject(out);
+}
+
 /**
  * Strips alternate-screen TUI frame borders and footer status bars (e.g. OpenCode `┃` sidebars,
  * pure box-drawing dividers, and Claude Code `⏺` / shortcut footers) so first-line summaries
@@ -1303,7 +1379,29 @@ export function cleanTuiFrameChrome(rawText: string): string {
   if (!rawText) {
     return "";
   }
-  const lines = rawText.replace(/\r\n/g, "\n").split("\n");
+  let lines = rawText.replace(/\r\n/g, "\n").split("\n");
+
+  // When scraping multi-step Claude Code TUI scrollback (`⏺ Read(...)` / `⏺ Update(...)` / `⏺ Bash(...)` + `⎿` results),
+  // isolate the final assistant response block that follows the last tool invocation so pre-tool commentary is skipped.
+  const CLAUDE_TOOL_HEADER_RE =
+    /^[ \t]*⏺[ \t]+(?:Read|Update|Write|Edit|MultiEdit|Bash|Shell|Glob|Grep|LS|Search|Fetch|Task|NotebookEdit|WebFetch|WebSearch|TodoWrite)\s*\(/;
+  let lastToolMarkerIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i]!;
+    if (CLAUDE_TOOL_HEADER_RE.test(l) || /^[ \t]*⎿/.test(l)) {
+      lastToolMarkerIdx = i;
+    }
+  }
+  if (lastToolMarkerIdx !== -1) {
+    for (let j = lines.length - 1; j > lastToolMarkerIdx; j--) {
+      const l = lines[j]!;
+      if (/^[ \t]*⏺[ \t]+\S/.test(l) && !CLAUDE_TOOL_HEADER_RE.test(l)) {
+        lines = lines.slice(j);
+        break;
+      }
+    }
+  }
+
   const cleaned: string[] = [];
 
   for (const rawLine of lines) {
@@ -1333,11 +1431,12 @@ export function cleanTuiFrameChrome(rawText: string): string {
       cleaned.push("");
       continue;
     }
-    // Skip common OpenCode / Claude TUI chrome footers and thinking banners
+    // Skip common OpenCode / Claude TUI chrome footers, mode indicators, and powerline prompts
     if (
-      /^(?:ctrl\+[a-z]\b.*|esc\s+(?:again\s+)?to\s+interrupt.*|esc\s+interrupt.*|\?\s+for\s+shortcuts.*|▣\s+(?:Build|Plan)\b.*|Thinking:\s*.*|▣\s+.*)$/i.test(
+      /^(?:ctrl\+[a-z]\b.*|esc\s+(?:again\s+)?to\s+interrupt.*|esc\s+interrupt.*|\?\s+for\s+shortcuts.*|⏵⏵\s+.*|\(shift\+tab\s+to\s+cycle\).*|▣\s+(?:Build|Plan)\b.*|Thinking:\s*.*|▣\s+.*)$/i.test(
         lineTrimmed,
-      )
+      ) ||
+      /[\ue0b0-\ue0b7]/.test(lineTrimmed)
     ) {
       continue;
     }
@@ -1378,12 +1477,45 @@ export function cleanTuiFrameChrome(rawText: string): string {
     cleaned.pop();
   }
 
+  const RECEIPT_ALLOWED_KEYS = new Set([
+    "ask",
+    "notice",
+    "resolve",
+    "later",
+    "events",
+  ]);
+
   // Normalize indented ```agent-autoloop / ``` fences from TUI message padding
+  let lastOpenFence = -1;
+  let matchingCloseFence = -1;
   for (let i = 0; i < cleaned.length; i++) {
     const t = cleaned[i]!.trim();
-    if (t === "```agent-autoloop" || t === "```") {
+    if (t === "```agent-autoloop") {
       cleaned[i] = t;
+      lastOpenFence = i;
+      matchingCloseFence = -1;
+    } else if (t === "```") {
+      cleaned[i] = t;
+      if (lastOpenFence !== -1 && matchingCloseFence === -1) {
+        matchingCloseFence = i;
+      }
     }
+  }
+
+  if (lastOpenFence !== -1 && matchingCloseFence > lastOpenFence) {
+    const fencedBody = cleaned
+      .slice(lastOpenFence + 1, matchingCloseFence)
+      .map((l) => l.trim())
+      .join("\n");
+    const repairedFenced = parseTuiWrappedJsonObject(fencedBody);
+    if (repairedFenced) {
+      return [
+        ...cleaned.slice(0, lastOpenFence + 1),
+        JSON.stringify(repairedFenced),
+        ...cleaned.slice(matchingCloseFence),
+      ].join("\n");
+    }
+    return cleaned.join("\n");
   }
 
   const joined = cleaned.join("\n");
@@ -1393,13 +1525,6 @@ export function cleanTuiFrameChrome(rawText: string): string {
 
   // Full-screen Markdown TUIs (e.g. OpenCode / Claude Code) hide ```agent-autoloop fence lines
   // when rendering code blocks on the alternate screen, leaving the raw JSON object at the tail.
-  const RECEIPT_ALLOWED_KEYS = new Set([
-    "ask",
-    "notice",
-    "resolve",
-    "later",
-    "events",
-  ]);
   let closeLineIdx = -1;
   let inspectedTail = 0;
   for (let i = cleaned.length - 1; i >= 0 && inspectedTail < 15; i--) {
@@ -1426,26 +1551,18 @@ export function cleanTuiFrameChrome(rawText: string): string {
         .slice(startIdx, closeLineIdx + 1)
         .map((l) => l.trim())
         .join("\n");
-      try {
-        const parsedObj: unknown = JSON.parse(candidateJson);
-        if (
-          parsedObj !== null &&
-          typeof parsedObj === "object" &&
-          !Array.isArray(parsedObj)
-        ) {
-          const keys = Object.keys(parsedObj as Record<string, unknown>);
-          if (keys.every((k) => RECEIPT_ALLOWED_KEYS.has(k))) {
-            const before = cleaned.slice(0, startIdx);
-            return [
-              ...before,
-              "```agent-autoloop",
-              JSON.stringify(parsedObj),
-              "```",
-            ].join("\n");
-          }
+      const parsedObj = parseTuiWrappedJsonObject(candidateJson);
+      if (parsedObj) {
+        const keys = Object.keys(parsedObj);
+        if (keys.length > 0 && keys.every((k) => RECEIPT_ALLOWED_KEYS.has(k))) {
+          const before = cleaned.slice(0, startIdx);
+          return [
+            ...before,
+            "```agent-autoloop",
+            JSON.stringify(parsedObj),
+            "```",
+          ].join("\n");
         }
-      } catch {
-        // Keep scanning earlier `{` lines for multi-line JSON block.
       }
     }
   }
@@ -1741,6 +1858,7 @@ export async function runHerdrAgent(
   const liveAgentTargets = allTargets.filter((t) => t.hasLiveAgent);
 
   let resolvedTarget: MergedHerdrTarget | undefined;
+  let spawnedWithAddDir = false;
 
   // Priority 1: Resume original session pane (`job.session`)
   const requestedSession = firstNonEmpty(job.session);
@@ -1845,6 +1963,7 @@ export async function runHerdrAgent(
                 "--allow-dangerously-skip-permissions",
               );
             } else {
+              spawnedWithAddDir = true;
               extraStartArgs.push(
                 "--",
                 "--permission-mode",
@@ -1863,6 +1982,7 @@ export async function runHerdrAgent(
                 "--dangerously-bypass-approvals-and-sandbox",
               );
             } else {
+              spawnedWithAddDir = true;
               extraStartArgs.push(
                 "--",
                 "-s",
@@ -2258,18 +2378,29 @@ export async function runHerdrAgent(
   mkdirSync(runDir, { recursive: true });
   const useLocalHandoff = !isRemote && configuredAccess !== "read";
   let handoffFile: string | undefined;
+  let workspaceHandoffAutoloopDir: string | null = null;
+  let createdWorkspaceAutoloopDir = false;
   let attemptCounter = 1;
   if (useLocalHandoff) {
-    const runHandoffDir = path.join(
-      handoffDir,
-      `run-${Math.max(0, Math.trunc(job.run))}`,
-    );
+    const runNum = Math.max(0, Math.trunc(job.run));
+    const runHandoffDir = path.join(handoffDir, `run-${runNum}`);
     mkdirSync(runHandoffDir, { recursive: true, mode: 0o700 });
     attemptCounter = nextHandoffAttempt(runHandoffDir);
-    handoffFile = path.join(
-      runHandoffDir,
-      `herdr-handoff-attempt-${attemptCounter}.md`,
-    );
+    if (!spawnedWithAddDir && existsSync(expandedCwd)) {
+      const wsAutoloopDir = path.join(expandedCwd, ".autoloop");
+      createdWorkspaceAutoloopDir = !existsSync(wsAutoloopDir);
+      mkdirSync(wsAutoloopDir, { recursive: true, mode: 0o700 });
+      workspaceHandoffAutoloopDir = wsAutoloopDir;
+      handoffFile = path.join(
+        wsAutoloopDir,
+        `run-${runNum}-herdr-handoff-attempt-${attemptCounter}.md`,
+      );
+    } else {
+      handoffFile = path.join(
+        runHandoffDir,
+        `herdr-handoff-attempt-${attemptCounter}.md`,
+      );
+    }
     rmSync(handoffFile, { force: true });
   } else {
     attemptCounter = nextHandoffAttempt(runDir);
@@ -2654,18 +2785,143 @@ export async function runHerdrAgent(
       return v.exitCode === 0 ? extractReadOutputText(v.stdout) : "";
     };
 
+    // In Claude Code 2.1.x without Herdr state hooks installed, `herdr agent prompt --wait` can
+    // resolve during the 1–2s TTFT gap between consecutive tool calls (`Update` -> `Bash` -> `Write`)
+    // because the bottom `❯` input box stays permanently visible. Debounce real Claude TUI screens
+    // until `handoffFile` lands or 5 consecutive checks (~3s) confirm `esc to interrupt` stays clear.
+    if (
+      settledStatus !== "blocked" &&
+      normalizeHerdrAgentKind(resolvedTarget.agentKind ?? "") === "claude"
+    ) {
+      const handoffReady = handoffFile
+        ? (await readFile(handoffFile, "utf8").catch(() => "")).trim().length >
+          0
+        : false;
+      if (!handoffReady) {
+        const initialVis = await readBlockedScreen();
+        if (
+          /esc to interrupt|running .*hooks|\(shift\+tab|\?\s+for\s+shortcuts|Enter to stay in auto mode/i.test(
+            initialVis,
+          )
+        ) {
+          const settleDeadline = Date.now() + effectiveTimeoutMs;
+          let autoModeResumed = false;
+          let quietStreak = /esc to interrupt|running .*hooks/i.test(initialVis)
+            ? 0
+            : 1;
+          const handleAutoModeModal = async (): Promise<void> => {
+            autoModeResumed = true;
+            quietStreak = 0;
+            await runHerdrCmd(["pane", "send-keys", paneId, "enter"], {
+              signal,
+              timeoutMs: 5_000,
+            });
+            await sleepWithSignal(700, signal);
+            // Claude Code stops the interrupted turn on first auto-mode fallback ("Claude goes on at your next message");
+            // send a brief continuation on the same pane so the remaining tool steps & handoff complete seamlessly.
+            const contExec = await runHerdrCmd(
+              [
+                "agent",
+                "prompt",
+                paneId,
+                "请继续完成刚才被中断的步骤，并按要求写入交接文件与输出回执。",
+                "--wait",
+                "--timeout",
+                String(
+                  Math.max(5_000, settleDeadline - Date.now()),
+                ),
+              ],
+              {
+                signal,
+                timeoutMs: Math.max(10_000, settleDeadline - Date.now() + 5_000),
+              },
+            );
+            const contJson =
+              contExec.exitCode === 0
+                ? parseHerdrJsonResult(contExec.stdout)
+                : null;
+            const contAgent = asRecord(contJson?.agent);
+            if (typeof contAgent?.agent_status === "string") {
+              settledStatus = contAgent.agent_status;
+            }
+          };
+
+          if (/Enter to stay in auto mode/i.test(initialVis)) {
+            await handleAutoModeModal();
+          }
+          while (settledStatus !== "blocked" && Date.now() < settleDeadline) {
+            if (signal?.aborted) {
+              return cancelledExecution(sessionId, true, null);
+            }
+            await sleepWithSignal(600, signal);
+            const curVis = await readBlockedScreen();
+            if (
+              !autoModeResumed &&
+              /Enter to stay in auto mode/i.test(curVis)
+            ) {
+              await handleAutoModeModal();
+              if (settledStatus === "blocked") {
+                break;
+              }
+              continue;
+            }
+            const screenBusy = /esc to interrupt|running .*hooks/i.test(curVis);
+            if (handoffFile) {
+              const hf = await readFile(handoffFile, "utf8").catch(() => "");
+              if (hf.trim().length > 0 && !screenBusy) {
+                settledStatus = "idle";
+                break;
+              }
+            }
+            const gExec = await runHerdrCmd(["agent", "get", paneId], {
+              signal,
+              timeoutMs: DEFAULT_DISCOVERY_TIMEOUT_MS,
+            });
+            const gJson =
+              gExec.exitCode === 0 ? parseHerdrJsonResult(gExec.stdout) : null;
+            const gAgent = asRecord(gJson?.agent) ?? gJson;
+            const gSt =
+              typeof gAgent?.agent_status === "string"
+                ? gAgent.agent_status
+                : "";
+            if (gSt === "blocked") {
+              settledStatus = "blocked";
+              break;
+            }
+            if (!screenBusy && (gSt === "idle" || gSt === "done")) {
+              quietStreak += 1;
+              if (quietStreak >= 5) {
+                settledStatus = gSt;
+                break;
+              }
+            } else {
+              quietStreak = 0;
+            }
+          }
+        }
+      }
+    }
+
     for (
       let unblockStep = 0;
-      settledStatus === "blocked" && unblockStep < 4;
+      settledStatus === "blocked" && unblockStep < 8;
       unblockStep += 1
     ) {
       const visText = await readBlockedScreen();
       if (signal?.aborted) {
         return cancelledExecution(sessionId, true, null);
       }
+      if (/Enter to stay in auto mode/i.test(visText)) {
+        await runHerdrCmd(["pane", "send-keys", paneId, "enter"], {
+          signal,
+          timeoutMs: 5_000,
+        });
+        await sleepWithSignal(600, signal);
+        continue;
+      }
       const compactVis = visText.replace(/\s+/g, "");
       const touchesControlSecret =
-        /(?:guard\.json|owner\.token|ingest\.token|master\.key|ipc\.json|hub\.db)/i.test(
+        /(?:guard\.json|owner\.token|ingest\.token|master\.key|ipc\.json|hub\.db|rules\.json|\.gemini\/config\/config\.json)/i.test(
           compactVis,
         );
       const asksReadContext =
@@ -2677,7 +2933,31 @@ export async function runHerdrAgent(
         (compactVis.includes(path.basename(handoffFile!).replace(/\s+/g, "")) ||
           compactVis.includes("herdr-handoff"));
 
-      if (touchesControlSecret || (!asksReadContext && !asksWriteHandoff)) {
+      const hasHighRiskCommand =
+        /\b(?:rm|rmdir|unlink|sudo)\b|git\s+(?:push|reset|clean)|drop\s+(?:table|database|schema)|truncate\s+table/i.test(
+          visText,
+        ) ||
+        (Array.isArray(job.askFirst) &&
+          job.askFirst.some(
+            (pat) =>
+              typeof pat === "string" &&
+              pat.trim().length > 0 &&
+              visText.toLowerCase().includes(pat.trim().toLowerCase()),
+          ));
+
+      const asksSafeWorkspaceTool =
+        !isRemote &&
+        configuredAccess !== "read" &&
+        !hasHighRiskCommand &&
+        /(?:Do you want to (?:proceed|make this edit|create|allow)|Yes,\s*allow)/i.test(
+          visText,
+        ) &&
+        /[❯>•›]\s*(?:1\.\s*)?Yes\b/i.test(visText);
+
+      if (
+        touchesControlSecret ||
+        (!asksReadContext && !asksWriteHandoff && !asksSafeWorkspaceTool)
+      ) {
         break;
       }
 
@@ -2725,13 +3005,16 @@ export async function runHerdrAgent(
         const gAgent = asRecord(gJson?.agent) ?? gJson;
         const gSt =
           typeof gAgent?.agent_status === "string" ? gAgent.agent_status : "";
-        if (gSt === "blocked") {
+        if (
+          gSt === "blocked" ||
+          /Enter to stay in auto mode/i.test(curVis)
+        ) {
           settledStatus = "blocked";
           break;
         }
         if (!screenBusy && (gSt === "idle" || gSt === "done")) {
           resumeIdleStreak += 1;
-          if (resumeIdleStreak >= 3) {
+          if (resumeIdleStreak >= 5) {
             settledStatus = gSt;
             break;
           }
@@ -2840,6 +3123,16 @@ export async function runHerdrAgent(
       cancelled: false,
     };
   } finally {
+    if (workspaceHandoffAutoloopDir && handoffFile) {
+      rmSync(handoffFile, { force: true });
+      if (createdWorkspaceAutoloopDir) {
+        try {
+          rmdirSync(workspaceHandoffAutoloopDir);
+        } catch {
+          // Non-empty .autoloop directory; leave user files untouched.
+        }
+      }
+    }
     if (stagedSshInfo) {
       await cleanupRemoteContextOverSsh({
         sshBin: stagedSshInfo.sshBin,
