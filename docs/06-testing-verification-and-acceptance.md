@@ -11,7 +11,7 @@
 
 ## 2. 五层验证金字塔全景
 
-全仓当前常态化自动化测试规模：**66 个测试套件（suites）、238 项自动化测试用例（tests）**（`npm test` 100% 离线零外部副作用执行）。
+全仓当前常态化自动化测试规模：**66 个测试套件（suites）、240 项自动化测试用例（tests）**（`npm test` 100% 离线零外部副作用执行）。
 
 ```mermaid
 flowchart TB
@@ -70,8 +70,8 @@ flowchart TB
    - `tests/v11-kernel-store.test.ts`：跨进程 `store.commitLatest` 增量追平与回滚零脏写、`DEFAULT_ASK_FIRST` 与同组有效 `parallel` 一致性、`http(s)` 链接白名单、首行 Markdown 剥离与逆向围栏扫描、同 `(grp, lane)` 跨规则互斥、`context.decided` 含 `"done"`、`60s` 指数退避与第 3 次连续失败末行预警卡、`tell: "always"` 自动 `fyi` 简报与 `[<rule>]` 通知前缀、终态 `timers` 自动清理。
    - `tests/v11-engine-guard.test.ts`：2 次回执修复耗尽 `discardReceipt` 降级结案、坏历史会话 `!started` 自动无会话重试与延迟 `session` 补报、流式 `result` 后 `30s` 宽限回收、`PreToolUse` 三层控制面自保护与子 Shell/内联脚本穿透拦截、中英文否定批复防误授权限、全执行器敏感环境变量剥离。
    - `tests/v11-delivery-incremental.test.ts`：第 2 轮 `prevSha..headSha` 定向增量复核、纯 `*.md` 与非祖先 rebase 回退全量补丁、`blocking` 触发路径与普通测试分节轻读、默认 `30m` 超时与 `2` 轮上限升级人工奏折卡、跨分支名 SHA 幂等缓存。
-5. **`v1.2.0` 四大多引擎执行矩阵与跨厂商盲审专项测试套件索引（纳入 66 套件 / 238 用例基线）**：
-   - `tests/v12-codex-claude.test.ts`：`codex exec` 父命令参数置于 `resume` 之前的精确 argv 顺序（`-C`、`--skip-git-repo-check`、`--color never`、`-s read-only` / `-s workspace-write` / `--dangerously-bypass-approvals-and-sandbox` 先于 `resume`）、`-o` 末条消息文件兜底采集、`claude`/`zcode`/`dsh` NDJSON 流解析与 `#271` 缓存 Token 归一化（`totalInput = input_tokens + cacheRead + cacheCreate`，确保 `cached <= input`）、`CLAUDECODE` 剥离，以及 `-pid` 进程组信号回收。
+5. **`v1.2.0` 四大多引擎执行矩阵与跨厂商盲审专项测试套件索引（纳入 66 套件 / 240 用例基线）**：
+   - `tests/v12-codex-claude.test.ts`：`codex exec` 父命令参数置于 `resume` 之前的精确 argv 顺序（`-C`、`--skip-git-repo-check`、`--color never`、`-s read-only` / `-s workspace-write` / `--dangerously-bypass-approvals-and-sandbox` 先于 `resume`）、`-o` 末条消息文件兜底采集、`claude`/`zcode`/`dsh` NDJSON 流解析与 `#271` 缓存 Token 归一化（`totalInput = input_tokens + cacheRead + cacheCreate`，确保 `cached <= input`）、原生 `claude` `--settings` `PreToolUse` 安全护栏挂载、`CLAUDECODE` 剥离，以及 `-pid` 进程组信号回收。
    - `tests/v12-acp-runner.test.ts`：Stdio 双帧 JSON-RPC 2.0 ACP 握手（声明 `fs.readTextFile: true`、`fs.writeTextFile: access !== "read"`、`terminal: false`）、`session/new` 与 `session/load` 失效回退、`session/request_permission` + `fs/*` 回调层的 `guard.json` fail-closed 强制护栏、`<AUTOLOOP_HOME>` `external_directory` 与子路径封锁，以及 `access: "read"` 严格只读工具白名单。
    - `tests/v12-herdr-runner.test.ts`：Reuse-First 复用优先窗格选择（`w3:p1`、具名 Agent、`kind:<kind>`、`spawn:<kind>` 同工作区隔离与无抢焦点 `workspace create --no-focus` + `agent start`）、OpenCode 残留模态弹窗 `esc` 自动清理、`herdr agent prompt <paneId> <wrappedPrompt> --wait` 参数隔离派发、本机 `0600` `herdr-handoff-attempt-<N>.md` 无损交接 + `--machine` / `--remote` 远程模式 `0600` 只读上下文投递与 `agent read --source recent-unwrapped` 终端增量回执捕获、存活忙碌窗格（`herdr:wX:pY`）跨退避重试保留会话，以及取消时仅发 `send-keys esc` 安全中断。
    - `tests/v12-multi-engine-integration.test.ts`：`Supervisor` 8 类执行器统一路由、全部 6 类有状态执行器（`agy-print` / `agentapi-ui` / `codex` / `claude` / `acp` / `herdr`）的 2 轮原会话 `repairPrompt` 回执修复与 `discardReceipt` 安全降级、忙碌会话保留 vs 死亡会话降级分流，以及 `delivery/` 经由 `codex` / `claude` / `acp` 执行跨厂商只读盲审与 `(reviewerRunner, reviewerCommand, reviewerModel)` 审查缓存键隔离。

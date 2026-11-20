@@ -1041,4 +1041,72 @@ describe("claude-runner: claude/zcode/dsh args, #271 cache token accounting & ND
     assert.equal(isProcessAlive(abortPids.parentPid), false);
     assert.equal(isProcessAlive(abortPids.childPid), false);
   });
+
+  it("wires hooks/pre-tool-guard.mjs via --settings and enables --allowedTools for native claude binary in edit mode", async () => {
+    const dir = makeTempDir();
+    const binDir = path.join(dir, "claude-bin");
+    mkdirSync(binDir, { recursive: true });
+    const captureFile = path.join(dir, "claude-native-argv.json");
+
+    const fakeNativeClaude = makeExecutableScript(
+      binDir,
+      "claude",
+      `
+      import { writeFileSync } from "node:fs";
+      writeFileSync(${JSON.stringify(captureFile)}, JSON.stringify(process.argv.slice(2)), "utf8");
+      console.log(JSON.stringify({ type: "system", subtype: "init", session_id: "claude-hook-1" }));
+      console.log(JSON.stringify({ type: "result", subtype: "success", is_error: false, session_id: "claude-hook-1", result: "已完成 Bash 单测执行" }));
+      `,
+    );
+
+    const editExec = await runClaudePrint({
+      job: makeJob({
+        agent: {
+          id: "c-edit",
+          name: "Claude Edit",
+          runner: "claude",
+          access: "edit",
+        },
+      }),
+      contextFile: path.join(dir, "context.json"),
+      guardFile: path.join(dir, "guard.json"),
+      claudeBin: fakeNativeClaude,
+    });
+    assert.equal(editExec.outcome, "done");
+
+    const editArgv = JSON.parse(readFileSync(captureFile, "utf8")) as string[];
+    const settingsIdx = editArgv.indexOf("--settings");
+    assert.ok(settingsIdx !== -1, "native claude must receive --settings");
+    const parsedSettings = JSON.parse(editArgv[settingsIdx + 1] ?? "{}") as {
+      hooks?: { PreToolUse?: Array<{ hooks?: Array<{ command?: string }> }> };
+    };
+    assert.match(
+      parsedSettings.hooks?.PreToolUse?.[0]?.hooks?.[0]?.command ?? "",
+      /pre-tool-guard\.mjs/,
+    );
+    const allowedIdx = editArgv.indexOf("--allowedTools");
+    assert.ok(
+      allowedIdx !== -1,
+      "native claude in edit mode must receive --allowedTools so safe Bash dev commands run under PreToolUse guard",
+    );
+    assert.match(editArgv[allowedIdx + 1] ?? "", /\bBash\b/);
+
+    // Read-only mode must still wire --settings but NOT --allowedTools
+    await runClaudePrint({
+      job: makeJob({
+        agent: {
+          id: "c-read",
+          name: "Claude Read",
+          runner: "claude",
+          access: "read",
+        },
+      }),
+      contextFile: path.join(dir, "context.json"),
+      guardFile: path.join(dir, "guard.json"),
+      claudeBin: fakeNativeClaude,
+    });
+    const readArgv = JSON.parse(readFileSync(captureFile, "utf8")) as string[];
+    assert.ok(readArgv.includes("--settings"));
+    assert.equal(readArgv.includes("--allowedTools"), false);
+  });
 });

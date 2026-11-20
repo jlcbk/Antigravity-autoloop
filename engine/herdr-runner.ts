@@ -1853,6 +1853,26 @@ export async function runHerdrAgent(
                 handoffDir,
               );
             }
+          } else if (normalizedKind === "codex" && !isRemote) {
+            const access = job.agent.access ?? "edit";
+            if (access === "read") {
+              extraStartArgs.push("--", "-s", "read-only", "-a", "never");
+            } else if (access === "full") {
+              extraStartArgs.push(
+                "--",
+                "--dangerously-bypass-approvals-and-sandbox",
+              );
+            } else {
+              extraStartArgs.push(
+                "--",
+                "-s",
+                "workspace-write",
+                "-a",
+                "never",
+                "--add-dir",
+                handoffDir,
+              );
+            }
           }
           const startExec = await runHerdrCmd(
             [
@@ -1946,22 +1966,44 @@ export async function runHerdrAgent(
                     visExec.exitCode === 0
                       ? extractReadOutputText(visExec.stdout)
                       : "";
+                  const isUpdatePrompt =
+                    /Update available\b[\s\S]*(?:Update now|Skip until next version|esc\s+skip)/i.test(
+                      visText,
+                    );
                   const isTrustScreen =
-                    /(?:trust the files in this folder|trust this folder|trust the contents of this directory|Adding a new directory|Is this a (?:project|directory) you created or one you trust|Yes,\s*proceed|Yes,\s*I trust|Yes,\s*add it)/i.test(
+                    /(?:trust the files in this folder|trust this folder|trust the contents of this directory|Do you trust the contents of this directory|Adding a new directory|Is this a (?:project|directory) you created or one you trust|Yes,\s*proceed|Yes,\s*continue|Yes,\s*I trust|Yes,\s*add it)/i.test(
                       visText,
                     );
                   const screenSig = visText.trim().slice(-240);
-                  if (isTrustScreen && screenSig !== lastApprovedScreenSig) {
+                  if (isUpdatePrompt && screenSig !== lastApprovedScreenSig) {
+                    lastApprovedScreenSig = screenSig;
+                    trustApprovalsSent += 1;
+                    const escRes = await runHerdrCmd(
+                      ["pane", "send-keys", shellPaneId, "esc"],
+                      { signal, timeoutMs: 5_000 },
+                    );
+                    if (escRes.exitCode !== 0 && !escRes.aborted) {
+                      await runHerdrCmd(
+                        ["agent", "send-keys", shellPaneId, "esc"],
+                        { signal, timeoutMs: 5_000 },
+                      );
+                    }
+                  } else if (
+                    isTrustScreen &&
+                    screenSig !== lastApprovedScreenSig
+                  ) {
                     lastApprovedScreenSig = screenSig;
                     trustApprovalsSent += 1;
                     const needsDownArrow =
-                      /[❯>•]\s*No,\s*exit/i.test(visText) ||
+                      /[❯>•›]\s*(?:2\.\s*)?No,\s*(?:exit|quit)/i.test(
+                        visText,
+                      ) ||
                       (visText.indexOf("No, exit") !== -1 &&
                         (visText.indexOf("Yes, I trust") >
                           visText.indexOf("No, exit") ||
                           visText.indexOf("Yes, add it") >
                             visText.indexOf("No, exit")) &&
-                        !/[❯>•]\s*Yes,/i.test(visText));
+                        !/[❯>•›]\s*(?:1\.\s*)?Yes,/i.test(visText));
                     if (needsDownArrow) {
                       const downRes = await runHerdrCmd(
                         ["pane", "send-keys", shellPaneId, "down"],

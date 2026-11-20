@@ -1,6 +1,8 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promptFor, readMessage } from "../protocol/receipt.ts";
 import type { Job, RunUsage } from "../protocol/types.ts";
 import { type RunnerExecution, sanitizeRunnerEnv } from "./agy-runner.ts";
@@ -715,6 +717,43 @@ export async function runClaudePrint(
   const expandedCwd = expandCwd(job.rule.cwd, baseEnv);
   const prompt = promptOverride ?? promptFor(job, contextFile);
   const args = buildClaudeArgs(job, prefixArgs);
+
+  // For native `claude` CLI in `-p` print mode, `--permission-mode acceptEdits` auto-denies `Bash`
+  // because there is no interactive TTY prompt handler. Wire our deterministic `hooks/pre-tool-guard.mjs`
+  // via `--settings` and enable standard workspace tools in `edit` mode so safe dev commands (`node --test`,
+  // `npm test`, `git status`) execute while `askFirst` & control-plane secrets remain strictly guarded.
+  const binBase = path.basename(bin).toLowerCase();
+  if (
+    (binBase === "claude" || binBase === "claude.exe") &&
+    !prefixArgs.includes("--settings")
+  ) {
+    const preToolGuardPath = fileURLToPath(
+      new URL("../hooks/pre-tool-guard.mjs", import.meta.url),
+    );
+    if (existsSync(preToolGuardPath)) {
+      const hookCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(preToolGuardPath)}`;
+      const hookSettings = JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              hooks: [{ type: "command", command: hookCommand }],
+            },
+          ],
+        },
+      });
+      args.push("--settings", hookSettings);
+    }
+    if (
+      (job.agent.access ?? "edit") === "edit" &&
+      !prefixArgs.includes("--allowedTools") &&
+      !prefixArgs.includes("--allowed-tools")
+    ) {
+      args.push(
+        "--allowedTools",
+        "Bash,Read,Edit,Write,MultiEdit,Glob,Grep,LS,Task,TodoWrite",
+      );
+    }
+  }
 
   const cleanEnv = sanitizeRunnerEnv(baseEnv, job, contextFile, guardFile);
   cleanEnv.PATH = augmentRunnerPath(baseEnv);

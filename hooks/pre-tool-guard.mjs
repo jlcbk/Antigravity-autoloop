@@ -27,6 +27,10 @@ const GUARD_CORRUPT_DENY_REASON =
   "Autoloop 运行护栏文件 (guard.json) 读取或解析失败，按 fail-closed 安全策略拒绝执行。";
 
 const WRITE_TOOL_NAMES = new Set([
+  "write",
+  "edit",
+  "multiedit",
+  "notebookedit",
   "write_file",
   "edit_file",
   "delete_file",
@@ -46,6 +50,7 @@ const DELETE_TOOL_NAMES = new Set(["delete_file", "remove_file"]);
 const SEARCH_DIR_TOOL_NAMES = new Set([
   "grep_search",
   "grep",
+  "glob",
   "ripgrep",
   "search_files",
 ]);
@@ -56,6 +61,7 @@ const FILE_ARG_KEYS = new Set([
   "path",
   "filepath",
   "file_path",
+  "notebook_path",
   "file",
   "searchpath",
   "directorypath",
@@ -172,7 +178,8 @@ const HIGH_RISK_CATEGORIES = [
     aliases: ["rm-rf", "rm", "delete-files", "delete-file", "删除文件", "删除"],
     patternMatches: [
       /\brm\b/i,
-      /\b删除文件\b/,
+      /删除文件/,
+      /删除/,
       /\bdelete\b/i,
       /\bunlink\b/i,
       /\brmdir\b/i,
@@ -216,7 +223,25 @@ const HIGH_RISK_CATEGORIES = [
 
 const MAX_SUBSHELL_DEPTH = 5;
 
+let isClaudeCodeHookFormat = false;
+
 function respond(payload) {
+  if (isClaudeCodeHookFormat && payload && typeof payload === "object") {
+    const isDeny = payload.decision === "deny";
+    const claudeOut = {
+      ...(isDeny ? { decision: "block" } : {}),
+      ...(payload.reason ? { reason: payload.reason } : {}),
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: isDeny ? "deny" : "allow",
+        ...(payload.reason
+          ? { permissionDecisionReason: payload.reason }
+          : {}),
+      },
+    };
+    process.stdout.write(`${JSON.stringify(claudeOut)}\n`);
+    return;
+  }
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
@@ -1733,12 +1758,25 @@ async function main() {
     return;
   }
 
+  if (
+    payload &&
+    typeof payload === "object" &&
+    (typeof payload.tool_name === "string" ||
+      payload.hook_event_name === "PreToolUse")
+  ) {
+    isClaudeCodeHookFormat = true;
+  }
+
   const toolCall = payload?.toolCall ?? {};
-  const toolName = String(toolCall?.name ?? "")
+  const toolName = String(toolCall?.name ?? payload?.tool_name ?? "")
     .trim()
     .toLowerCase();
   const args =
-    toolCall?.args && typeof toolCall.args === "object" ? toolCall.args : {};
+    toolCall?.args && typeof toolCall.args === "object"
+      ? toolCall.args
+      : payload?.tool_input && typeof payload.tool_input === "object"
+        ? payload.tool_input
+        : {};
 
   const access = typeof guard?.access === "string" ? guard.access : "edit";
   const guardCwd = typeof guard?.cwd === "string" ? guard.cwd : "";
@@ -1807,7 +1845,11 @@ async function main() {
   }
 
   // 2. Shell command execution
-  if (toolName === "run_command") {
+  if (
+    toolName === "run_command" ||
+    toolName === "bash" ||
+    toolName === "shell"
+  ) {
     const commandLine = extractCommandLine(args);
 
     // 2a. Always deny touching protected secrets/guard.json or mutating config.json/hub.db/rules.json

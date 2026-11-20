@@ -1323,7 +1323,7 @@ process.exit(0);
     const startCall = calls.find(
       (c) => c.argv[0] === "agent" && c.argv[1] === "start",
     );
-    assert.deepEqual(startCall?.argv, [
+    assert.deepEqual(startCall?.argv.slice(0, 12), [
       "agent",
       "start",
       "autoloop-78",
@@ -1331,7 +1331,14 @@ process.exit(0);
       "codex",
       "--pane",
       "w4:p2",
+      "--",
+      "-s",
+      "workspace-write",
+      "-a",
+      "never",
     ]);
+    assert.equal(startCall?.argv[12], "--add-dir");
+    assert.match(startCall?.argv[13] ?? "", /herdr-handoff$/);
   });
 
   it("falls back to 'agent read --source recent-unwrapped --lines 160' (and then '--source visible') when handoffFile is not written", async () => {

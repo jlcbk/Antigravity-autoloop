@@ -1475,4 +1475,75 @@ describe("WP-B Verifier Round-1 Must-Fixes (2, 3, 4)", () => {
       await supervisor.stop();
     }
   });
+
+  it("supports Claude Code PreToolUse JSON schema and blocks plain rm when askFirst contains Chinese '删除文件'", () => {
+    const tmpDir = makeTempDir();
+    const autoloopHome = path.join(tmpDir, "autoloop_home");
+    const runDir = path.join(autoloopHome, "runs", "12-1");
+    const workCwd = path.join(tmpDir, "repo");
+    mkdirSync(runDir, { recursive: true });
+    mkdirSync(workCwd, { recursive: true });
+
+    const guardFile = path.join(runDir, "guard.json");
+    writeFileSync(path.join(autoloopHome, "owner.token"), "secret", "utf8");
+    writeFileSync(
+      guardFile,
+      JSON.stringify({
+        run: 12,
+        attempt: 1,
+        rule: "claude-clean",
+        cwd: workCwd,
+        access: "edit",
+        askFirst: ["删除文件"],
+        approvedKeys: [],
+      }),
+      "utf8",
+    );
+
+    // 1. Safe test command via Claude Code PreToolUse format -> permissionDecision: "allow"
+    const allowRes = runPreToolHook(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "node --test sum.test.mjs" },
+      },
+      { AUTOLOOP_GUARD_FILE: guardFile },
+    ) as Record<string, unknown>;
+    assert.deepEqual(allowRes, {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "allow",
+      },
+    });
+
+    // 2. Plain `rm keep-me.txt` under Chinese askFirst `["删除文件"]` -> permissionDecision: "deny" + decision: "block"
+    const denyRmRes = runPreToolHook(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Bash",
+        tool_input: { command: "rm keep-me.txt" },
+      },
+      { AUTOLOOP_GUARD_FILE: guardFile },
+    ) as {
+      decision?: string;
+      hookSpecificOutput?: { permissionDecision?: string };
+    };
+    assert.equal(denyRmRes.decision, "block");
+    assert.equal(denyRmRes.hookSpecificOutput?.permissionDecision, "deny");
+
+    // 3. Reading control-plane secret `owner.token` via Claude `Read` (`file_path`) -> deny
+    const denySecretRes = runPreToolHook(
+      {
+        hook_event_name: "PreToolUse",
+        tool_name: "Read",
+        tool_input: { file_path: path.join(autoloopHome, "owner.token") },
+      },
+      { AUTOLOOP_GUARD_FILE: guardFile },
+    ) as {
+      decision?: string;
+      hookSpecificOutput?: { permissionDecision?: string };
+    };
+    assert.equal(denySecretRes.decision, "block");
+    assert.equal(denySecretRes.hookSpecificOutput?.permissionDecision, "deny");
+  });
 });
