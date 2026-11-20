@@ -1108,7 +1108,8 @@ describe("WP-B 5: unified runner env sanitization & command-runner bounded outpu
       assert.equal(captured.ANTIGRAVITY_SIDECAR_UI_TOKEN, undefined);
       assert.equal(captured.ANTIGRAVITY_SIDECAR_TOKEN, undefined);
       assert.equal(captured.ANTIGRAVITY_SIDECAR_WEB_PORT, undefined);
-      assert.equal(captured.ANTIGRAVITY_CSRF_TOKEN, undefined);
+      // ANTIGRAVITY_CSRF_TOKEN must remain intact so `language_server agentapi` can authenticate gRPC calls
+      assert.equal(captured.ANTIGRAVITY_CSRF_TOKEN, "sec-9");
       assert.equal(captured.NORMAL_USER_VAR, "keep-me");
     }
   });
